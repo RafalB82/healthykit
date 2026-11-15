@@ -107,6 +107,8 @@ def add_hosted_workspace(db: Session, settings: Settings, label: str | None) -> 
     agent_token = generate_token("hs_agent")
 
     db.add(WorkspaceRecord(id=workspace_id, created_at=created_at, label=label))
+    # Models have no relationship(), so a single flush may insert children first.
+    db.flush()
     db.add_all(
         [
             AccessTokenRecord(
@@ -174,6 +176,9 @@ def persist_sync_payload(
         else:
             device.last_seen_at = received_at
             device.app_version = app_version or device.app_version
+        # Insert parents before the rows that reference them; the models have no
+        # relationship(), so one flush would not order the inserts.
+        db.flush()
 
         workspace_device = db.get(WorkspaceDeviceRecord, (workspace_id, payload.device_id))
         if workspace_device is None:
@@ -214,6 +219,7 @@ def persist_sync_payload(
             batch.received_at = received_at
             batch.metrics_count = len(payload.metrics)
             batch.workouts_count = len(payload.workouts)
+        db.flush()
 
         for deletion in payload.deletions:
             model = HealthWorkoutRecord if deletion.kind == "workout" else HealthMetricRecord

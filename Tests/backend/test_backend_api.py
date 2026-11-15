@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 
 from backend.app import create_app
 from backend.config import Settings
@@ -14,6 +15,8 @@ from backend.models import Base
 def make_client(tmp_path: Path, hosted: bool = False) -> TestClient:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'healthsync.sqlite'}"
     engine = create_engine_for_url(database_url)
+    # Enforce foreign keys like Postgres does; SQLite skips them by default.
+    event.listen(engine, "connect", lambda connection, _: connection.execute("PRAGMA foreign_keys=ON"))
     Base.metadata.create_all(engine)
     session_factory = create_session_factory(engine)
     app = create_app(
