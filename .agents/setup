@@ -63,8 +63,11 @@ EOF
 }
 
 configure_postgres() {
-  local conf="/etc/postgresql/15/main/postgresql.conf"
-  local hba="/etc/postgresql/15/main/pg_hba.conf"
+  # Debian 12 ships Postgres 15 and Debian 13 ships 17; use whichever is installed.
+  local version
+  version="$(ls /etc/postgresql 2>/dev/null | sort -V | tail -n1)"
+  local conf="/etc/postgresql/${version}/main/postgresql.conf"
+  local hba="/etc/postgresql/${version}/main/pg_hba.conf"
   local marker="# healthsync orb: prefer speed over durability"
 
   if [[ ! -f "$conf" ]]; then
