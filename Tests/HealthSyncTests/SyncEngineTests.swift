@@ -190,6 +190,18 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertFalse(BusyOperation.canStart(isBusy: true))
     }
 
+    func testPendingSyncIsDroppedOnlyForUserStop() async {
+        XCTAssertFalse(BusyOperation.shouldRerunPendingSync(hasWaiters: false, stopRequested: false))
+        XCTAssertTrue(BusyOperation.shouldRerunPendingSync(hasWaiters: true, stopRequested: false))
+
+        await Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            XCTAssertTrue(Task.isCancelled)
+            XCTAssertTrue(BusyOperation.shouldRerunPendingSync(hasWaiters: true, stopRequested: false))
+            XCTAssertFalse(BusyOperation.shouldRerunPendingSync(hasWaiters: true, stopRequested: true))
+        }.value
+    }
+
     func testFailedUploadKeepsBatchQueuedForRetry() async throws {
         let store = SyncEngineTestsStore()
         let engine = SyncEngine(store: store, uploader: FailingUploader())

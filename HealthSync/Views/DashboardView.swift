@@ -26,6 +26,7 @@ struct HealthPermissionPromptPresentation: Equatable {
 struct DashboardView: View {
     @EnvironmentObject private var appState: AppState
     @State private var isConfirmingClearQueue = false
+    @State private var isClearQueueBlocked = false
 
     private let columns = [
         GridItem(.flexible(), spacing: 16),
@@ -315,6 +316,11 @@ struct DashboardView: View {
             }
             .navigationTitle("Dashboard")
             .navigationBarTitleDisplayMode(.inline)
+            .alert("Can’t clear the pending queue", isPresented: $isClearQueueBlocked) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("A sync or another action started. Try clearing the queue again when it finishes.")
+            }
         }
     }
 
@@ -352,11 +358,17 @@ struct DashboardView: View {
             titleVisibility: .visible
         ) {
             Button("Discard \(PendingQueueLabel.records(status.pendingRecordCount))", role: .destructive) {
-                Task { await appState.clearPendingQueue() }
+                Task { @MainActor in
+                    guard !appState.isBusy else {
+                        isClearQueueBlocked = true
+                        return
+                    }
+                    await appState.clearPendingQueue()
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Queued records that have not been uploaded will be deleted from this iPhone. Apple Health keeps them; to send them later, sync that date range again from Sync historical data.")
+            Text("This clears only this iPhone’s queue. Automatic sync won’t recover discarded records. By default, Historical Sync sends new daily summaries for quantity metrics, not the original samples. Queued deletions are lost, so those records stay on the server.")
         }
     }
 

@@ -54,6 +54,10 @@ struct HealthActionFeedback: Equatable {
         kind: .success,
         message: "The last 24 hours were synced successfully."
     )
+    static let syncStopped = HealthActionFeedback(
+        kind: .info,
+        message: "Sync stopped. Unsent records stay in the pending queue. To pause automatic sync, set Background Sync to Manual only in Settings."
+    )
 
     static func failure(_ message: String) -> HealthActionFeedback {
         HealthActionFeedback(kind: .error, message: message)
@@ -83,6 +87,10 @@ enum DevelopmentKeychainBypass {
 enum BusyOperation {
     static func canStart(isBusy: Bool) -> Bool {
         !isBusy
+    }
+
+    static func shouldRerunPendingSync(hasWaiters: Bool, stopRequested: Bool) -> Bool {
+        hasWaiters && !stopRequested
     }
 }
 
@@ -179,7 +187,6 @@ final class AppState: ObservableObject {
     /// The one handle for the current busy operation; `stopSync()` cancels it.
     private var busyOperation: Task<Void, Never>?
     private var bootstrapTask: Task<Void, Never>?
-    private var pendingIncrementalSync = false
     private var pendingIncrementalWaiters: [CheckedContinuation<Bool, Never>] = []
 
     func bootstrap() async {
@@ -439,7 +446,6 @@ final class AppState: ObservableObject {
     @discardableResult
     func syncIncremental() async -> Bool {
         guard BusyOperation.canStart(isBusy: isBusy) else {
-            pendingIncrementalSync = true
             return await withCheckedContinuation { continuation in
                 pendingIncrementalWaiters.append(continuation)
             }
@@ -453,12 +459,10 @@ final class AppState: ObservableObject {
         return succeeded
     }
 
-    /// Cancels the current busy operation (sync, backfill, or any other `runBusy` work) and
-    /// returns once it has ended and `isBusy` is false. Batches already queued stay in the
-    /// pending queue, and syncs requested while it ran are dropped. Call it before starting
-    /// new busy work, not from inside a `runBusy` operation, which would wait on itself.
+    /// Cancels the current sync or backfill and waits for it to end. Already queued batches
+    /// stay in the pending queue, and incremental sync requests waiting on this run are dropped.
     func stopSync() async {
-        guard let busyOperation else { return }
+        guard canStopSync, let busyOperation else { return }
         isStoppingSync = true
         busyOperation.cancel()
         await busyOperation.value
@@ -651,7 +655,8 @@ final class AppState: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: interval * 1_000_000_000)
                 guard !Task.isCancelled else { return }
-                await self?.syncIncremental()
+                // Restarting the timer must not cancel a sync it already started.
+                _ = await Task { await self?.syncIncremental() }.value
             }
         }
     }
@@ -670,8 +675,8 @@ final class AppState: ObservableObject {
     }
 
     /// Runs `operation` as the busy operation in a stored task so `stopSync()` can cancel it.
-    /// Cancelling the calling task, such as the periodic sync loop, cancels it too.
-    /// `stoppable` marks a sync or backfill, which shows Stop sync and logs "Sync stopped.".
+    /// Cancelling the calling task (for example, at background task expiry) cancels it quietly.
+    /// `stoppable` marks a sync or backfill that the user can stop.
     private func runBusy(stoppable: Bool = false, _ operation: @escaping @MainActor () async throws -> Void) async {
         guard BusyOperation.canStart(isBusy: isBusy) else { return }
         isBusy = true
@@ -679,7 +684,7 @@ final class AppState: ObservableObject {
         lastError = nil
         actionFeedback = nil
         let task = Task { @MainActor in
-            await self.performBusyOperation(stoppable: stoppable, operation)
+            await self.performBusyOperation(operation)
         }
         busyOperation = task
         await withTaskCancellationHandler {
@@ -689,51 +694,41 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func performBusyOperation(stoppable: Bool, _ operation: () async throws -> Void) async {
-        var cancelled = false
+    private func performBusyOperation(_ operation: () async throws -> Void) async {
         defer {
-            // A stop requested after the work stopped checking for cancellation still counts.
-            let stopped = cancelled || isStoppingSync
+            let waiters = pendingIncrementalWaiters
+            pendingIncrementalWaiters.removeAll()
+            let shouldRerun = BusyOperation.shouldRerunPendingSync(
+                hasWaiters: !waiters.isEmpty, stopRequested: isStoppingSync
+            )
             isBusy = false
             busyOperation = nil
             canStopSync = false
             isStoppingSync = false
-            if pendingIncrementalSync {
-                // Each waiter is taken off the list here and resumed exactly once below.
-                pendingIncrementalSync = false
-                let waiters = pendingIncrementalWaiters
-                pendingIncrementalWaiters.removeAll()
-                if stopped {
-                    // A stop also drops syncs that observers requested while this one ran.
-                    waiters.forEach { $0.resume(returning: false) }
-                } else {
-                    Task { @MainActor [weak self] in
-                        let succeeded = await self?.syncIncremental() ?? false
-                        waiters.forEach { $0.resume(returning: succeeded) }
-                    }
+            if shouldRerun {
+                Task { @MainActor [weak self] in
+                    let succeeded = await self?.syncIncremental() ?? false
+                    waiters.forEach { $0.resume(returning: succeeded) }
                 }
+            } else {
+                waiters.forEach { $0.resume(returning: false) }
             }
         }
         do {
             try await operation()
-            await refresh()
-        } catch {
-            if Task.isCancelled || error is CancellationError {
-                cancelled = true
-                if stoppable {
-                    actionFeedback = HealthActionFeedback(kind: .info, message: "Sync stopped. Unsent records stay in the pending queue. To pause automatic sync, set Background Sync to Manual only in Settings.")
-                    try? await store?.appendLog(SyncLogEntry(level: .info, message: "Sync stopped."))
-                }
-                await refresh()
-                return
-            }
+        } catch where !Task.isCancelled && !(error is CancellationError) {
             let message = userMessage(from: error)
             lastError = message
             actionFeedback = .failure(message)
-            if let store {
-                try? await store.appendLog(SyncLogEntry(level: .error, message: message))
-                await refresh()
-            }
+            try? await store?.appendLog(SyncLogEntry(level: .error, message: message))
+        } catch {
+            // Cancellation alone is not a user stop.
+        }
+        await refresh()
+        if isStoppingSync {
+            actionFeedback = .syncStopped
+            try? await store?.appendLog(SyncLogEntry(level: .info, message: "Sync stopped."))
+            await refresh()
         }
     }
 

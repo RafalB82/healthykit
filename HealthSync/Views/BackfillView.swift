@@ -65,7 +65,9 @@ struct BackfillView: View {
                 VStack(spacing: 16) {
                     let isInvalidRange = endDate <= startDate
                     
-                    if appState.backfillProgress > 0 && appState.isBusy {
+                    if appState.actionFeedback == .syncStopped && !appState.isBusy {
+                        HealthActionFeedbackBanner(feedback: .syncStopped)
+                    } else if appState.backfillProgress > 0 && appState.isBusy {
                         VStack(spacing: 12) {
                             HStack {
                                 Text("Backfill in progress...")

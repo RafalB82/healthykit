@@ -395,7 +395,9 @@ actor SQLiteLocalStore: BatchPersisting {
         FROM batches WHERE uploaded_at IS NULL
         """)
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else { return (0, 0) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw SQLiteStoreError.statementFailed(Self.message(from: db))
+        }
         return (Int(sqlite3_column_int64(statement, 0)), Int(sqlite3_column_int64(statement, 1)))
     }
 
