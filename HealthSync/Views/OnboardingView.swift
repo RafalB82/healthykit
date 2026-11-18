@@ -1,7 +1,12 @@
 import SwiftUI
 
 enum OnboardingStorageDisclosure {
-    static let message = "Continue creates private hosted storage, then requests Health access. You can switch to your own backend later."
+    static let message = "Nothing leaves your iPhone until you choose where it goes: your own backend or hosted HealthSync storage."
+}
+
+enum OnboardingStep: Hashable {
+    case destination
+    case healthData
 }
 
 struct OnboardingView: View {
@@ -48,7 +53,7 @@ struct OnboardingView: View {
                         FeatureRow(
                             icon: "externaldrive.badge.checkmark",
                             iconColor: HealthSyncTheme.primaryBlue,
-                            title: "Private hosted storage",
+                            title: "You choose the destination",
                             description: OnboardingStorageDisclosure.message
                         )
 
@@ -88,9 +93,7 @@ struct OnboardingView: View {
                             HealthActionFeedbackBanner(feedback: feedback)
                         }
                         
-                        NavigationLink {
-                            OnboardingHealthDataView()
-                        } label: {
+                        NavigationLink(value: appState.hasChosenStorageDestination ? OnboardingStep.healthData : .destination) {
                             Text("Continue")
                         }
                         .buttonStyle(HealthSyncTheme.PrimaryButtonStyle(isBusy: appState.isBusy, gradient: HealthSyncTheme.heartGradient))
@@ -101,6 +104,12 @@ struct OnboardingView: View {
                 .padding(24)
             }
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: OnboardingStep.self) { step in
+                switch step {
+                case .destination: OnboardingDestinationView()
+                case .healthData: OnboardingHealthDataView()
+                }
+            }
         }
     }
 }

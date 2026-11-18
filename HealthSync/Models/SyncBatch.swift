@@ -3,6 +3,9 @@ import Foundation
 struct SyncBatch: Codable, Identifiable, Equatable {
     let id: UUID
     var payload: SyncPayload
+    /// The upload destination (see `UploadConfiguration.destination`) this batch was queued for.
+    /// It is never uploaded anywhere else.
+    let destination: String
     var createdAt: Date
     var uploadedAt: Date?
     var attemptCount: Int
@@ -11,6 +14,7 @@ struct SyncBatch: Codable, Identifiable, Equatable {
     init(
         id: UUID = UUID(),
         payload: SyncPayload,
+        destination: String,
         createdAt: Date = Date(),
         uploadedAt: Date? = nil,
         attemptCount: Int = 0,
@@ -18,6 +22,7 @@ struct SyncBatch: Codable, Identifiable, Equatable {
     ) {
         self.id = id
         self.payload = payload
+        self.destination = destination
         self.createdAt = createdAt
         self.uploadedAt = uploadedAt
         self.attemptCount = attemptCount

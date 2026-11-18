@@ -122,7 +122,8 @@ struct AppSettings: Codable, Equatable {
     var selectedTypes: Set<HealthDataType>
     var syncFrequency: SyncFrequency
     var hasRequestedHealthPermissions: Bool
-    var storageMode: StorageMode
+    /// Where health data uploads go. `nil` until the user explicitly picks a destination.
+    var storageMode: StorageMode?
     var hostedWorkspaceID: String?
     var hostedAgentEndpoint: String?
 
@@ -141,7 +142,7 @@ struct AppSettings: Codable, Equatable {
         selectedTypes: HealthDataPreset.core.types,
         syncFrequency: .hourlyBestEffort,
         hasRequestedHealthPermissions: false,
-        storageMode: .hostedHealthSync,
+        storageMode: nil,
         hostedWorkspaceID: nil,
         hostedAgentEndpoint: nil
     )
@@ -165,7 +166,15 @@ struct AppSettings: Codable, Equatable {
             Self.migratedHostedURL(backendURL, agent: false) ?? backendURL
         case .hostedHealthSync:
             Self.hostedBackendURL
+        case nil:
+            ""
         }
+    }
+
+    /// The destination new batches are queued for, or `nil` while no destination is chosen.
+    var uploadDestination: String? {
+        guard storageMode != nil else { return nil }
+        return UploadConfiguration.destinationKey(for: effectiveBackendURL)
     }
 
     @discardableResult
@@ -214,7 +223,7 @@ struct AppSettings: Codable, Equatable {
         selectedTypes: Set<HealthDataType>,
         syncFrequency: SyncFrequency,
         hasRequestedHealthPermissions: Bool,
-        storageMode: StorageMode,
+        storageMode: StorageMode?,
         hostedWorkspaceID: String?,
         hostedAgentEndpoint: String?
     ) {
@@ -234,9 +243,24 @@ struct AppSettings: Codable, Equatable {
         selectedTypes = Self.selectedTypesWithDefaultDietaryTypes(decodedSelectedTypes)
         syncFrequency = try container.decode(SyncFrequency.self, forKey: .syncFrequency)
         hasRequestedHealthPermissions = try container.decode(Bool.self, forKey: .hasRequestedHealthPermissions)
-        storageMode = try container.decodeIfPresent(StorageMode.self, forKey: .storageMode) ?? .customBackend
+        // Settings saved before hosted storage existed have no storageMode key and always used a custom backend.
+        // Newer settings always write the key, as null until the user chooses a destination.
+        storageMode = container.contains(.storageMode)
+            ? try container.decodeIfPresent(StorageMode.self, forKey: .storageMode)
+            : .customBackend
         hostedWorkspaceID = try container.decodeIfPresent(String.self, forKey: .hostedWorkspaceID)
         hostedAgentEndpoint = try container.decodeIfPresent(String.self, forKey: .hostedAgentEndpoint)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(backendURL, forKey: .backendURL)
+        try container.encode(selectedTypes, forKey: .selectedTypes)
+        try container.encode(syncFrequency, forKey: .syncFrequency)
+        try container.encode(hasRequestedHealthPermissions, forKey: .hasRequestedHealthPermissions)
+        try container.encode(storageMode, forKey: .storageMode)
+        try container.encodeIfPresent(hostedWorkspaceID, forKey: .hostedWorkspaceID)
+        try container.encodeIfPresent(hostedAgentEndpoint, forKey: .hostedAgentEndpoint)
     }
 
     private static func selectedTypesWithDefaultDietaryTypes(_ selectedTypes: Set<HealthDataType>) -> Set<HealthDataType> {

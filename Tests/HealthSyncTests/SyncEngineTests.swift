@@ -136,7 +136,7 @@ final class SyncEngineTests: XCTestCase {
     func testNegativeAcknowledgementKeepsBatchQueued() async throws {
         let store = SyncEngineTestsStore()
         let engine = SyncEngine(store: store, uploader: NegativeAcknowledgementUploader())
-        let batch = try await engine.queue(payload: .empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"))
+        let batch = try await engine.queue(payload: .empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"), destination: "https://example.com")
         let result = await engine.uploadPending(configuration: UploadConfiguration(baseURL: "https://example.com", token: "token", deviceID: "device", appVersion: "1.0"))
         let pending = try await store.pendingBatches()
         XCTAssertEqual(result.failedCount, 1)
@@ -147,7 +147,7 @@ final class SyncEngineTests: XCTestCase {
         let store = SyncEngineTestsStore()
         let uploader = SucceedingUploader()
         let engine = SyncEngine(store: store, uploader: uploader)
-        _ = try await engine.queue(payload: .empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"))
+        _ = try await engine.queue(payload: .empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"), destination: "https://example.com")
         let task = Task {
             withUnsafeCurrentTask { $0?.cancel() }
             return await engine.uploadPending(configuration: UploadConfiguration(baseURL: "https://example.com", token: "token", deviceID: "device", appVersion: "1.0"))
@@ -165,7 +165,7 @@ final class SyncEngineTests: XCTestCase {
         let uploader = StallingUploader()
         let engine = SyncEngine(store: store, uploader: uploader)
         for _ in 0..<3 {
-            _ = try await engine.queue(payload: .empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"))
+            _ = try await engine.queue(payload: .empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"), destination: "https://example.com")
         }
         let startedAt = Date()
         let task = Task {
@@ -211,7 +211,7 @@ final class SyncEngineTests: XCTestCase {
             timezone: "Asia/Kolkata"
         )
 
-        let batch = try await engine.queue(payload: payload)
+        let batch = try await engine.queue(payload: payload, destination: "https://example.com")
         let result = await engine.uploadPending(
             configuration: UploadConfiguration(baseURL: "https://example.com", token: "secret-token", deviceID: "device-123", appVersion: "1.0")
         )
@@ -234,7 +234,7 @@ final class SyncEngineTests: XCTestCase {
             timezone: "Asia/Kolkata"
         )
 
-        let batch = try await engine.queue(payload: payload)
+        let batch = try await engine.queue(payload: payload, destination: "https://example.com")
         _ = await engine.uploadPending(
             configuration: UploadConfiguration(baseURL: "https://example.com", token: "secret-token", deviceID: "device-123", appVersion: "1.0")
         )
@@ -267,8 +267,8 @@ final class SyncEngineTests: XCTestCase {
             dateRange: SyncDateRange(start: currentStart, end: Date(timeIntervalSince1970: 120)),
             timezone: "Asia/Kolkata"
         )
-        let staleBatch = try await engine.queue(payload: stalePayload)
-        let currentBatch = try await engine.queue(payload: currentPayload)
+        let staleBatch = try await engine.queue(payload: stalePayload, destination: "https://example.com")
+        let currentBatch = try await engine.queue(payload: currentPayload, destination: "https://example.com")
 
         let result = await engine.uploadQueuedBatch(
             currentBatch,
@@ -293,7 +293,7 @@ final class SyncEngineTests: XCTestCase {
             timezone: "Asia/Kolkata"
         )
 
-        _ = try await engine.queue(payload: payload)
+        _ = try await engine.queue(payload: payload, destination: "https://example.com")
         _ = await engine.uploadPending(
             configuration: UploadConfiguration(baseURL: "https://example.com", token: "secret-token", deviceID: "device-123", appVersion: "1.0")
         )
@@ -313,7 +313,7 @@ final class SyncEngineTests: XCTestCase {
             timezone: "Asia/Kolkata"
         )
 
-        try await engine.queue(payload: payload)
+        try await engine.queue(payload: payload, destination: "https://example.com")
         let firstRun = Task {
             await engine.uploadPending(
                 configuration: UploadConfiguration(baseURL: "https://example.com", token: "secret-token", deviceID: "device-123", appVersion: "1.0")
@@ -570,7 +570,7 @@ final class IncrementalMaintenanceTests: XCTestCase {
         let oldPayload = try HealthNormalizer().payload(deviceID: configuration.deviceID,
             dateRange: SyncDateRange(start: now, end: now), timezone: "UTC",
             quantitySamples: oldSamples.quantitySamples, sleepSamples: [], workoutSamples: [])
-        try await store.enqueueBatch(SyncBatch(payload: oldPayload, attemptCount: 2))
+        try await store.enqueueBatch(SyncBatch(payload: oldPayload, destination: "https://example.com", attemptCount: 2))
         let deletedID = oldPayload.metrics[0].id
         let reader = MaintenanceHealthReader(incremental: HealthKitIncrementalResult(fetchResult: .empty,
             anchors: [.heartRate: "after-delete"], deletions: [HealthRecordDeletion(id: deletedID, kind: .metric)]))
@@ -598,7 +598,7 @@ final class IncrementalMaintenanceTests: XCTestCase {
         let old = samples(1).quantitySamples[0]
         let oldPayload = try HealthNormalizer().payload(deviceID: configuration.deviceID,
             dateRange: SyncDateRange(start: now, end: now), timezone: "UTC", quantitySamples: [old], sleepSamples: [], workoutSamples: [])
-        try await store.enqueueBatch(SyncBatch(payload: oldPayload, attemptCount: 2))
+        try await store.enqueueBatch(SyncBatch(payload: oldPayload, destination: "https://example.com", attemptCount: 2))
         let newer = HealthQuantitySampleDTO(uuid: old.uuid, type: old.type, value: 999, unit: old.unit,
             startAt: old.startAt, endAt: old.endAt, sourceName: old.sourceName,
             sourceBundleIdentifier: old.sourceBundleIdentifier, metadata: [:])
@@ -615,7 +615,7 @@ final class IncrementalMaintenanceTests: XCTestCase {
     func testFreshIncrementalIsChunkedBeforeStaleRetryAndAnchorsSurviveRestart() async throws {
         let url = databaseURL()
         let store = try SQLiteLocalStore(url: url)
-        let stale = SyncBatch(payload: .empty(deviceID: configuration.deviceID, dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"), attemptCount: 2)
+        let stale = SyncBatch(payload: .empty(deviceID: configuration.deviceID, dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"), destination: "https://example.com", attemptCount: 2)
         try await store.enqueueBatch(stale)
         let reader = MaintenanceHealthReader(incremental: HealthKitIncrementalResult(fetchResult: samples(205), anchors: [.stepCount: "new-anchor"], deletions: [HealthRecordDeletion(id: "healthkit:deleted", kind: .metric)]))
         let uploader = MaintenanceUploader()
@@ -701,7 +701,7 @@ final class IncrementalMaintenanceTests: XCTestCase {
         let url = databaseURL()
         let store = try SQLiteLocalStore(url: url)
         let batch = SyncBatch(payload: .empty(deviceID: configuration.deviceID,
-            dateRange: SyncDateRange(start: now, end: now), timezone: "UTC"), attemptCount: 2)
+            dateRange: SyncDateRange(start: now, end: now), timezone: "UTC"), destination: "https://example.com", attemptCount: 2)
         try await store.enqueueBatch(batch)
         let reader = MaintenanceHealthReader()
         await reader.setRaw(.empty, fail: true)
@@ -729,7 +729,7 @@ final class IncrementalMaintenanceTests: XCTestCase {
     func testFailedReconciliationPreservesReadErrorWhenPendingRetryFails() async throws {
         let store = try SQLiteLocalStore(url: databaseURL())
         let batch = SyncBatch(payload: .empty(deviceID: configuration.deviceID,
-            dateRange: SyncDateRange(start: now, end: now), timezone: "UTC"), attemptCount: 2)
+            dateRange: SyncDateRange(start: now, end: now), timezone: "UTC"), destination: "https://example.com", attemptCount: 2)
         try await store.enqueueBatch(batch)
         let reader = MaintenanceHealthReader()
         await reader.setRaw(.empty, fail: true)
@@ -754,7 +754,7 @@ final class IncrementalMaintenanceTests: XCTestCase {
     func testStaleBacklogAttemptsOnlyOneBatchPerDay() async throws {
         let store = try SQLiteLocalStore(url: databaseURL())
         for index in 0..<3 {
-            try await store.enqueueBatch(SyncBatch(payload: .empty(deviceID: configuration.deviceID, dateRange: SyncDateRange(start: now, end: now), timezone: "UTC"), createdAt: now.addingTimeInterval(Double(index)), attemptCount: 2))
+            try await store.enqueueBatch(SyncBatch(payload: .empty(deviceID: configuration.deviceID, dateRange: SyncDateRange(start: now, end: now), timezone: "UTC"), destination: "https://example.com", createdAt: now.addingTimeInterval(Double(index)), attemptCount: 2))
         }
         let reader = MaintenanceHealthReader()
         let uploader = MaintenanceUploader(fails: true)
@@ -795,7 +795,7 @@ final class PagedBackfillQueueTests: XCTestCase {
                 let payload = try HealthNormalizer().payload(deviceID: "fixture", dateRange: SyncDateRange(start: start, end: end), timezone: "UTC",
                     quantitySamples: page.quantitySamples, sleepSamples: [], workoutSamples: [])
                 for upload in BackfillSync.uploadPayloads(for: payload) {
-                    let queued = try await engine.queue(payload: upload)
+                    let queued = try await engine.queue(payload: upload, destination: "https://example.com")
                     try BackfillSync.validateUpload(await engine.uploadQueuedBatch(queued, configuration: configuration))
                 }
             }
@@ -812,5 +812,181 @@ final class PagedBackfillQueueTests: XCTestCase {
         XCTAssertEqual(result.uploadedCount, 1)
         let remaining = try await reopened.pendingBatches()
         XCTAssertTrue(remaining.isEmpty)
+    }
+}
+
+final class UploadDestinationContractTests: XCTestCase {
+    private let hosted = AppSettings.hostedBackendURL
+    private let own = UploadConfiguration(baseURL: "https://mine.example/", token: "token", deviceID: "device", appVersion: "1.0")
+
+    private func emptyPayload() -> SyncPayload {
+        .empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC")
+    }
+
+    func testBatchesOnlyUploadToTheDestinationTheyWereQueuedForAndLogTheHost() async throws {
+        let store = SyncEngineTestsStore()
+        let uploader = SucceedingUploader()
+        let engine = SyncEngine(store: store, uploader: uploader)
+        let hostedBatch = try await engine.queue(payload: emptyPayload(), destination: hosted)
+
+        let pendingRun = await engine.uploadPending(configuration: own)
+        let directRun = await engine.uploadQueuedBatch(hostedBatch, configuration: own)
+
+        let uploadedAfterSwitch = await uploader.uploadedIDs
+        XCTAssertTrue(uploadedAfterSwitch.isEmpty)
+        XCTAssertEqual(pendingRun.uploadedCount, 0)
+        XCTAssertEqual(directRun.failedCount, 1)
+        let stillQueued = try await store.pendingBatches()
+        XCTAssertEqual(stillQueued.map(\.id), [hostedBatch.id])
+
+        let ownBatch = try await engine.queue(payload: emptyPayload(), destination: own.destination)
+        let ownRun = await engine.uploadPending(configuration: own)
+        let uploaded = await uploader.uploadedIDs
+        let logs = await store.logs.map(\.message)
+        XCTAssertEqual(ownRun.uploadedCount, 1)
+        XCTAssertEqual(uploaded, [ownBatch.id])
+        XCTAssertTrue(logs.contains { $0.hasPrefix("Uploaded batch \(ownBatch.payload.exportID.uuidString) to mine.example ") }, "\(logs)")
+        XCTAssertTrue(logs.contains { $0.contains("queued for api.healthysync.app") }, "\(logs)")
+        XCTAssertTrue(logs.contains { $0.hasSuffix("for api.healthysync.app.") && $0.hasPrefix("Queued ") }, "\(logs)")
+    }
+
+    func testIncrementalRetryNeverSendsBatchesQueuedForAnotherDestination() async throws {
+        let store = try SQLiteLocalStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("Destination-\(UUID()).sqlite"))
+        let hostedBatch = SyncBatch(payload: emptyPayload(), destination: hosted)
+        try await store.enqueueBatch(hostedBatch)
+        let uploader = MaintenanceUploader()
+
+        try await IncrementalSyncRunner(store: store, reader: MaintenanceHealthReader(), uploader: uploader)
+            .run(types: [.heartRate], configuration: own)
+
+        let sent = await uploader.payloads
+        let pending = try await store.pendingBatches()
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertEqual(pending.map(\.id), [hostedBatch.id])
+    }
+}
+
+private final class NetworkRecordingURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var recorded: [String] = []
+    static var requests: [String] { lock.withLock { recorded } }
+    static func reset() { lock.withLock { recorded = [] } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.lock.withLock { Self.recorded.append(request.url?.absoluteString ?? "") }
+        if let url = request.url, url.host == "reject.example" {
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(#"{"ok":false,"received":0,"duplicates":0}"#.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        } else {
+            client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+        }
+    }
+    override func stopLoading() {}
+}
+
+@MainActor
+final class StorageOptInAppStateTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        NetworkRecordingURLProtocol.reset()
+    }
+
+    private func databaseURL() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("OptIn-\(UUID()).sqlite")
+    }
+
+    private func makeAppState(databaseURL: URL) -> AppState {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NetworkRecordingURLProtocol.self]
+        return AppState(storeURL: databaseURL, apiSession: URLSession(configuration: configuration))
+    }
+
+    func testFreshInstallNeverProvisionsOrUploadsBeforeChoosingStorage() async throws {
+        let url = databaseURL()
+        let appState = makeAppState(databaseURL: url)
+        await appState.bootstrap()
+        XCTAssertNil(appState.settings.storageMode)
+
+        await appState.connectAppleHealth()
+        XCTAssertEqual(appState.lastError, APIClientError.noStorageDestination.userMessage)
+        XCTAssertFalse(appState.settings.hasRequestedHealthPermissions)
+
+        await appState.syncLast24Hours()
+        await appState.backfill(start: Date().addingTimeInterval(-3 * 24 * 60 * 60), end: Date())
+        let synced = await appState.syncIncremental()
+        XCTAssertFalse(synced)
+
+        XCTAssertEqual(NetworkRecordingURLProtocol.requests, [])
+        XCTAssertNil(appState.settings.storageMode)
+        XCTAssertFalse(appState.hasChosenStorageDestination)
+        XCTAssertEqual(appState.lastError, APIClientError.noStorageDestination.userMessage)
+        let reopened = try SQLiteLocalStore(url: url)
+        let saved = try await reopened.loadSettings()
+        XCTAssertNil(saved.storageMode)
+        let pending = try await reopened.pendingBatches()
+        XCTAssertNil(saved.hostedWorkspaceID)
+        XCTAssertTrue(pending.isEmpty)
+    }
+
+    func testAutomaticSyncDoesNotStartWithoutDestinationEvenWithHealthAccess() async throws {
+        let url = databaseURL()
+        let seed = try SQLiteLocalStore(url: url)
+        var settings = AppSettings.default
+        settings.hasRequestedHealthPermissions = true
+        try await seed.saveSettings(settings)
+
+        let appState = makeAppState(databaseURL: url)
+        await appState.bootstrap()
+        await appState.sceneDidEnterBackground()
+        await appState.performBackgroundSync()
+        await appState.sceneDidBecomeActive()
+        XCTAssertTrue(appState.settings.hasRequestedHealthPermissions)
+        XCTAssertNil(appState.lastError)
+        XCTAssertNil(appState.status.lastAttemptedSyncAt)
+        XCTAssertEqual(NetworkRecordingURLProtocol.requests, [])
+    }
+
+    func testOwnBackendNegativeAcknowledgementDoesNotSaveDestination() async throws {
+        let url = databaseURL()
+        let appState = makeAppState(databaseURL: url)
+        await appState.bootstrap()
+
+        let saved = await appState.useOwnBackend(backendURL: "https://reject.example", tokenDraft: "test-token")
+        XCTAssertFalse(saved)
+        XCTAssertEqual(NetworkRecordingURLProtocol.requests, ["https://reject.example/api/apple-health/sync"])
+        XCTAssertEqual(appState.lastError, APIClientError.invalidResponse.userMessage)
+        XCTAssertFalse(appState.hasChosenStorageDestination)
+        let reopened = try SQLiteLocalStore(url: url)
+        let persisted = try await reopened.loadSettings()
+        XCTAssertNil(persisted.storageMode)
+        XCTAssertTrue(persisted.backendURL.isEmpty)
+    }
+
+    func testSwitchingDestinationDiscardsBatchesQueuedForThePreviousOneInsteadOfSendingThem() async throws {
+        let url = databaseURL()
+        let seed = try SQLiteLocalStore(url: url)
+        var settings = AppSettings.default
+        settings.storageMode = .hostedHealthSync
+        try await seed.saveSettings(settings)
+        try await seed.enqueueBatch(SyncBatch(
+            payload: .empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"),
+            destination: AppSettings.hostedBackendURL
+        ))
+
+        let appState = makeAppState(databaseURL: url)
+        await appState.bootstrap()
+        XCTAssertEqual(appState.status.pendingUploadCount, 1)
+
+        appState.settings.storageMode = .customBackend
+        appState.settings.backendURL = "https://mine.example"
+        await appState.saveSettingsAndToken()
+
+        XCTAssertEqual(appState.status.pendingUploadCount, 0)
+        XCTAssertTrue(appState.logs.contains { $0.message.hasPrefix("Discarded 1 queued uploads") && $0.message.contains("mine.example") })
+        XCTAssertEqual(NetworkRecordingURLProtocol.requests, [])
     }
 }

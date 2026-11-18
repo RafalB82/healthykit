@@ -26,6 +26,7 @@
 		110000000000000000000010 /* HealthKitTypeRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11000000000000000000010F /* HealthKitTypeRegistry.swift */; };
 		110000000000000000000011 /* HealthKitManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000110 /* HealthKitManager.swift */; };
 		110000000000000000000012 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000111 /* OnboardingView.swift */; };
+		11000000000000000000001B /* OnboardingDestinationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11000000000000000000011A /* OnboardingDestinationView.swift */; };
 		110000000000000000000013 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000112 /* DashboardView.swift */; };
 		110000000000000000000014 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000113 /* SettingsView.swift */; };
 		110000000000000000000015 /* BackfillView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000114 /* BackfillView.swift */; };
@@ -65,6 +66,7 @@
 		11000000000000000000010F /* HealthKitTypeRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitTypeRegistry.swift; sourceTree = "<group>"; };
 		110000000000000000000110 /* HealthKitManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitManager.swift; sourceTree = "<group>"; };
 		110000000000000000000111 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		11000000000000000000011A /* OnboardingDestinationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingDestinationView.swift; sourceTree = "<group>"; };
 		110000000000000000000112 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		110000000000000000000113 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		110000000000000000000114 /* BackfillView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillView.swift; sourceTree = "<group>"; };
@@ -186,6 +188,7 @@
 			isa = PBXGroup;
 			children = (
 				110000000000000000000111 /* OnboardingView.swift */,
+				11000000000000000000011A /* OnboardingDestinationView.swift */,
 				110000000000000000000112 /* DashboardView.swift */,
 				110000000000000000000113 /* SettingsView.swift */,
 				110000000000000000000114 /* BackfillView.swift */,
@@ -319,6 +322,7 @@
 				110000000000000000000010 /* HealthKitTypeRegistry.swift in Sources */,
 				110000000000000000000011 /* HealthKitManager.swift in Sources */,
 				110000000000000000000012 /* OnboardingView.swift in Sources */,
+				11000000000000000000001B /* OnboardingDestinationView.swift in Sources */,
 				110000000000000000000013 /* DashboardView.swift in Sources */,
 				110000000000000000000014 /* SettingsView.swift in Sources */,
 				110000000000000000000015 /* BackfillView.swift in Sources */,

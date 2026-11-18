@@ -192,10 +192,12 @@ final class AppState: ObservableObject {
     private var busyOperation: Task<Void, Never>?
     private var bootstrapTask: Task<Void, Never>?
     private var pendingIncrementalWaiters: [CheckedContinuation<Bool, Never>] = []
+    private let apiSession: URLSession
 
-    init(storeURL: URL? = nil, keychain: any TokenProviding = KeychainStore()) {
+    init(storeURL: URL? = nil, keychain: any TokenProviding = KeychainStore(), apiSession: URLSession = .shared) {
         self.storeURL = storeURL
         self.keychain = keychain
+        self.apiSession = apiSession
     }
 
     func bootstrap() async {
@@ -216,8 +218,9 @@ final class AppState: ObservableObject {
         do {
             let localStore = try SQLiteLocalStore(url: storeURL)
             store = localStore
-            syncEngine = SyncEngine(store: localStore)
-            incrementalSyncRunner = IncrementalSyncRunner(store: localStore, reader: healthKit)
+            let uploader = APIClient(session: apiSession)
+            syncEngine = SyncEngine(store: localStore, uploader: uploader)
+            incrementalSyncRunner = IncrementalSyncRunner(store: localStore, reader: healthKit, uploader: uploader)
             settings = try await localStore.loadSettings()
             hasStoredToken = try DevelopmentKeychainBypass.hasStoredToken {
                 try hasTokenForCurrentStorageMode()
@@ -248,9 +251,14 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// True once the user explicitly chose a storage destination and its credentials are saved.
+    var hasChosenStorageDestination: Bool {
+        hasUsableUploadConfiguration()
+    }
+
     func connectAppleHealth() async {
         await runBusy { [self] in
-            try await prepareHostedStorageIfNeeded()
+            guard settings.storageMode != nil else { throw APIClientError.noStorageDestination }
             try await healthKit.requestReadPermissions(for: settings.selectedTypes)
             settings.hasRequestedHealthPermissions = true
             shouldShowOnboarding = false
@@ -312,44 +320,75 @@ final class AppState: ObservableObject {
         } catch {
             backendFeedback = .failure(userMessage(from: error))
         }
+        // Saving can discard batches queued for a previous destination; show the new queue.
+        await refresh()
     }
 
+    /// The explicit onboarding or Settings opt-in to hosted storage.
     func createHostedStorage() async {
         await runBusy { [self] in
-            try await prepareHostedStorageIfNeeded()
+            try await enableHostedStorage()
+            await startObserversIfPossible()
             restartPeriodicSync()
         }
     }
 
+    /// Tests the backend URL and token the user entered and, only when the backend accepts the test upload,
+    /// saves them as the upload destination. Returns whether the destination was saved.
+    func useOwnBackend(backendURL: String, tokenDraft: String) async -> Bool {
+        var saved = false
+        await runBusy { [self] in
+            guard let store else { throw APIClientError.invalidResponse }
+            var candidate = settings
+            candidate.storageMode = .customBackend
+            candidate.backendURL = backendURL
+            _ = try APIClient.validatedRootURL(from: candidate.effectiveBackendURL)
+            let draft = tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            let token = draft.isEmpty
+                ? (try keychain.readToken() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                : draft
+            guard !token.isEmpty else { throw APIClientError.missingToken }
+
+            try await sendConnectionTest(configuration: UploadConfiguration(
+                baseURL: candidate.effectiveBackendURL,
+                token: token,
+                deviceID: try await store.deviceID(),
+                appVersion: Self.appVersion
+            ))
+            if !draft.isEmpty {
+                try keychain.saveToken(draft)
+            }
+            settings.backendURL = candidate.backendURL
+            settings.storageMode = .customBackend
+            hasStoredToken = true
+            try await saveSettingsOnly()
+            await startObserversIfPossible()
+            restartPeriodicSync()
+            saved = true
+        }
+        return saved
+    }
+
     func resetHostedStorage() async {
         await runBusy { [self] in
-            let client = APIClient(maxAttempts: 1)
-            let label = "Personal Health"
             let ingestToken = (try keychain.readHostedIngestToken() ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let response: HostedWorkspaceProvisioningResponse
 
             if ingestToken.isEmpty {
-                response = try await client.provisionHostedWorkspace(
-                    baseURL: AppSettings.hostedBackendURL,
-                    label: label
-                )
+                try await enableHostedStorage(reuseExisting: false)
             } else {
                 do {
-                    response = try await client.resetHostedWorkspace(
+                    let response = try await APIClient(session: apiSession, maxAttempts: 1).resetHostedWorkspace(
                         baseURL: AppSettings.hostedBackendURL,
                         token: ingestToken,
-                        label: label
+                        label: "Personal Health"
                     )
+                    try await applyHostedWorkspace(response)
                 } catch APIClientError.authRejected {
-                    response = try await client.provisionHostedWorkspace(
-                        baseURL: AppSettings.hostedBackendURL,
-                        label: label
-                    )
+                    try await enableHostedStorage(reuseExisting: false)
                 }
             }
 
-            try await applyHostedWorkspace(response)
             restartPeriodicSync()
         }
     }
@@ -360,7 +399,7 @@ final class AppState: ObservableObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !ingestToken.isEmpty else { throw APIClientError.missingToken }
 
-            let response = try await APIClient(maxAttempts: 1).refreshHostedAgentToken(
+            let response = try await APIClient(session: apiSession, maxAttempts: 1).refreshHostedAgentToken(
                 baseURL: AppSettings.hostedBackendURL,
                 token: ingestToken
             )
@@ -376,7 +415,6 @@ final class AppState: ObservableObject {
 
     private func applyHostedWorkspace(_ response: HostedWorkspaceProvisioningResponse) async throws {
         settings.storageMode = .hostedHealthSync
-        settings.backendURL = response.backendURL
         settings.hostedWorkspaceID = response.workspaceID
         settings.hostedAgentEndpoint = response.agentEndpoint
         try keychain.saveHostedIngestToken(response.ingestToken)
@@ -386,33 +424,34 @@ final class AppState: ObservableObject {
         try await saveSettingsOnly()
     }
 
-    private func prepareHostedStorageIfNeeded() async throws {
-        guard settings.storageMode == .hostedHealthSync else { return }
+    private func enableHostedStorage(reuseExisting: Bool = true) async throws {
+        if reuseExisting {
+            let existingAgentEndpoint = settings.hostedAgentEndpoint?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let existingAgentToken = (try keychain.readHostedAgentToken() ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let existingIngestToken = (try keychain.readHostedIngestToken() ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let existingAgentEndpoint = settings.hostedAgentEndpoint?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let existingAgentToken = hostedAgentToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        let existingIngestToken = (try keychain.readHostedIngestToken() ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        switch UploadDestinationPreparation.resolve(
-            storageMode: settings.storageMode,
-            hasAgentEndpoint: !existingAgentEndpoint.isEmpty,
-            hasAgentToken: !existingAgentToken.isEmpty,
-            hasIngestToken: !existingIngestToken.isEmpty
-        ) {
-        case .ready:
-            if settings.storageMode == .hostedHealthSync {
+            if UploadDestinationPreparation.resolve(
+                storageMode: .hostedHealthSync,
+                hasAgentEndpoint: !existingAgentEndpoint.isEmpty,
+                hasAgentToken: !existingAgentToken.isEmpty,
+                hasIngestToken: !existingIngestToken.isEmpty
+            ) == .ready {
+                settings.storageMode = .hostedHealthSync
+                hostedAgentToken = existingAgentToken
                 hasStoredToken = true
                 try await saveSettingsOnly()
+                return
             }
-        case .provisionHostedStorage:
-            let response = try await APIClient(maxAttempts: 1).provisionHostedWorkspace(
-                baseURL: AppSettings.hostedBackendURL,
-                label: "Personal Health"
-            )
-            try await applyHostedWorkspace(response)
         }
+
+        let response = try await APIClient(session: apiSession, maxAttempts: 1).provisionHostedWorkspace(
+            baseURL: AppSettings.hostedBackendURL,
+            label: "Personal Health"
+        )
+        try await applyHostedWorkspace(response)
     }
 
     func testConnection() async {
@@ -424,18 +463,7 @@ final class AppState: ObservableObject {
         let testedMode = settings.storageMode
         let feedback: HealthActionFeedback
         do {
-            guard let store else { throw APIClientError.invalidResponse }
-            let configuration = try await uploadConfiguration()
-            let now = Date()
-            let payload = SyncPayload.empty(
-                deviceID: try await store.deviceID(),
-                dateRange: SyncDateRange(start: now, end: now),
-                timezone: TimeZone.current.identifier
-            )
-            let result = try await APIClient(maxAttempts: 1).upload(batch: SyncBatch(payload: payload), configuration: configuration)
-            try await store.appendLog(
-                SyncLogEntry(level: .success, message: "Connection accepted (\(result.received) received, \(result.duplicates) duplicates).")
-            )
+            try await sendConnectionTest(configuration: try await uploadConfiguration())
             feedback = HealthActionFeedback(kind: .success, message: "Connection works. The backend accepted a test upload.")
         } catch {
             let message = userMessage(from: error)
@@ -448,11 +476,27 @@ final class AppState: ObservableObject {
         await refresh()
     }
 
+    private func sendConnectionTest(configuration: UploadConfiguration) async throws {
+        guard let store else { throw APIClientError.invalidResponse }
+        let now = Date()
+        let payload = SyncPayload.empty(
+            deviceID: configuration.deviceID,
+            dateRange: SyncDateRange(start: now, end: now),
+            timezone: TimeZone.current.identifier
+        )
+        let batch = SyncBatch(payload: payload, destination: configuration.destination)
+        let result = try await APIClient(session: apiSession, maxAttempts: 1).upload(batch: batch, configuration: configuration)
+        guard result.ok else { throw APIClientError.invalidResponse }
+        let host = UploadConfiguration.host(of: configuration.destination)
+        try await store.appendLog(
+            SyncLogEntry(level: .success, message: "Connection to \(host) accepted (\(result.received) received, \(result.duplicates) duplicates).")
+        )
+    }
+
     func syncLast24Hours() async {
         let end = Date()
         let start = end.addingTimeInterval(-24 * 60 * 60)
         await runBusy(stoppable: true) { [self] in
-            try await prepareHostedStorageIfNeeded()
             let uploaded = try await syncDateRangeThrowing(start: start, end: end)
             actionFeedback = uploaded ? .syncCompleted : .noSamples
         }
@@ -463,15 +507,14 @@ final class AppState: ObservableObject {
         backfillProgress = 0
         backfillError = nil
         await runBusy(stoppable: true) { [self] in
-            try await prepareHostedStorageIfNeeded()
             let chunks = BackfillSync.chunks(start: start, end: end)
             let total = Double(chunks.count)
             var uploadedAny = false
             for (index, chunk) in chunks.enumerated() {
                 do {
                     guard let store else { throw APIClientError.invalidResponse }
-                    try await ensureHealthPermissionsRequested()
                     let configuration = try await uploadConfiguration()
+                    try await ensureHealthPermissionsRequested()
                     let deviceID = try await store.deviceID()
                     try await healthKit.forEachBackfillBatch(
                         types: settings.selectedTypes, start: chunk.start, end: chunk.end, mode: mode
@@ -575,8 +618,8 @@ final class AppState: ObservableObject {
     private func syncIncrementalThrowing() async throws {
         guard let incrementalSyncRunner else { throw APIClientError.invalidResponse }
         try Task.checkCancellation()
-        try await ensureHealthPermissionsRequested()
         let configuration = try await uploadConfiguration()
+        try await ensureHealthPermissionsRequested()
         try await incrementalSyncRunner.run(types: settings.selectedTypes, configuration: configuration)
         await refresh()
     }
@@ -586,8 +629,8 @@ final class AppState: ObservableObject {
         end: Date
     ) async throws -> Bool {
         guard let store else { throw APIClientError.invalidResponse }
-        try await ensureHealthPermissionsRequested()
         let configuration = try await uploadConfiguration()
+        try await ensureHealthPermissionsRequested()
         let fetchResult = try await healthKit.fetchSamples(types: settings.selectedTypes, start: start, end: end)
         let uploaded = try await uploadFetchResult(
             fetchResult, deviceID: try await store.deviceID(), start: start, end: end,
@@ -619,7 +662,7 @@ final class AppState: ObservableObject {
         guard BackfillSync.shouldUpload(payload) else { return false }
         for uploadPayload in BackfillSync.uploadPayloads(for: payload) {
             try Task.checkCancellation()
-            let batch = try await syncEngine.queue(payload: uploadPayload)
+            let batch = try await syncEngine.queue(payload: uploadPayload, destination: configuration.destination)
             let result = await syncEngine.uploadQueuedBatch(batch, configuration: configuration)
             try BackfillSync.validateUpload(result)
         }
@@ -629,7 +672,17 @@ final class AppState: ObservableObject {
     private func saveSettingsOnly() async throws {
         guard let store else { throw APIClientError.invalidResponse }
         settings.migrateHostedEndpoints()
-        try await store.saveSettings(settings)
+        let snapshot = settings
+        let destination = snapshot.uploadDestination ?? ""
+        try await store.saveSettings(snapshot)
+        let discarded = try await store.discardPendingBatches(notFor: destination)
+        if discarded > 0 {
+            let target = destination.isEmpty ? "any destination" : UploadConfiguration.host(of: destination)
+            try await store.appendLog(SyncLogEntry(
+                level: .info,
+                message: "Discarded \(discarded) queued uploads meant for a previous destination. They will not be sent to \(target)."
+            ))
+        }
     }
 
     private func ensureHealthPermissionsRequested() async throws {
@@ -645,6 +698,7 @@ final class AppState: ObservableObject {
 
     private func uploadConfiguration() async throws -> UploadConfiguration {
         guard let store else { throw APIClientError.invalidResponse }
+        guard settings.storageMode != nil else { throw APIClientError.noStorageDestination }
         let baseURL = settings.effectiveBackendURL
         _ = try APIClient.validatedRootURL(from: baseURL)
         guard let token = try readUploadToken(), !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -654,8 +708,12 @@ final class AppState: ObservableObject {
             baseURL: baseURL,
             token: token,
             deviceID: try await store.deviceID(),
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+            appVersion: Self.appVersion
         )
+    }
+
+    private static var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
     }
 
     private func readUploadToken() throws -> String? {
@@ -664,6 +722,8 @@ final class AppState: ObservableObject {
             try keychain.readToken()
         case .hostedHealthSync:
             try keychain.readHostedIngestToken()
+        case nil:
+            nil
         }
     }
 
@@ -717,7 +777,8 @@ final class AppState: ObservableObject {
     }
 
     private func hasUsableUploadConfiguration() -> Bool {
-        guard (try? APIClient.validatedRootURL(from: settings.effectiveBackendURL)) != nil else {
+        guard settings.storageMode != nil,
+              (try? APIClient.validatedRootURL(from: settings.effectiveBackendURL)) != nil else {
             return false
         }
         return (try? hasTokenForCurrentStorageMode()) == true

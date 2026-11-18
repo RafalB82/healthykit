@@ -8,6 +8,7 @@ enum HTTPStatusClassification: Equatable {
 }
 
 enum APIClientError: LocalizedError, Equatable {
+    case noStorageDestination
     case invalidBackendURL
     case missingBackendURL
     case missingToken
@@ -18,6 +19,8 @@ enum APIClientError: LocalizedError, Equatable {
 
     var userMessage: String {
         switch self {
+        case .noStorageDestination:
+            "Choose where to store your health data before syncing."
         case .invalidBackendURL:
             "Enter a valid backend URL."
         case .missingBackendURL:
@@ -45,6 +48,19 @@ struct UploadConfiguration: Equatable {
     let token: String
     let deviceID: String
     let appVersion: String
+
+    /// Identifies the upload destination; queued batches only upload to the destination they were queued for.
+    var destination: String { Self.destinationKey(for: baseURL) }
+
+    static func destinationKey(for baseURL: String) -> String {
+        guard let url = try? APIClient.validatedRootURL(from: baseURL) else { return "" }
+        let key = url.absoluteString
+        return key.hasSuffix("/") ? String(key.dropLast()) : key
+    }
+
+    static func host(of destination: String) -> String {
+        URL(string: destination)?.host ?? "an unknown destination"
+    }
 }
 
 struct HostedWorkspaceProvisioningResponse: Codable, Equatable {
@@ -239,7 +255,7 @@ final class APIClient: SyncUploading {
                 throw CancellationError()
             } catch let error as APIClientError {
                 switch error {
-                case .authRejected, .serverRejected, .invalidBackendURL, .missingBackendURL, .missingToken, .invalidResponse:
+                case .authRejected, .serverRejected, .noStorageDestination, .invalidBackendURL, .missingBackendURL, .missingToken, .invalidResponse:
                     throw error
                 case .transientFailure:
                     lastTransientError = error

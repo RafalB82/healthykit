@@ -10,6 +10,21 @@ protocol BatchPersisting {
     func recordSyncSuccess(at date: Date) async throws
 }
 
+enum SyncLogMessages {
+    static func queued(_ payload: SyncPayload, destination: String) -> String {
+        "Queued \(payload.metrics.count) metrics, \(payload.workouts.count) workouts, and \(payload.deletions.count) deletions for \(UploadConfiguration.host(of: destination))."
+    }
+
+    static func uploaded(_ batch: SyncBatch, result: UploadResult) -> String {
+        let workspaceDetail = result.workspaceID.map { ", workspace \($0)" } ?? ""
+        return "Uploaded batch \(batch.payload.exportID.uuidString) to \(UploadConfiguration.host(of: batch.destination))\(workspaceDetail) (\(result.received) received, \(result.duplicates) duplicates, \(result.deleted) deleted)."
+    }
+
+    static func destinationMismatch(batch: SyncBatch, configuration: UploadConfiguration) -> String {
+        "Did not upload batch \(batch.payload.exportID.uuidString) to \(UploadConfiguration.host(of: configuration.destination)): it was queued for \(UploadConfiguration.host(of: batch.destination))."
+    }
+}
+
 struct SyncRunResult: Equatable {
     let uploadedCount: Int
     let failedCount: Int
@@ -29,15 +44,10 @@ actor SyncEngine {
     }
 
     @discardableResult
-    func queue(payload: SyncPayload) async throws -> SyncBatch {
-        let batch = SyncBatch(payload: payload)
+    func queue(payload: SyncPayload, destination: String) async throws -> SyncBatch {
+        let batch = SyncBatch(payload: payload, destination: destination)
         try await store.enqueueBatch(batch)
-        try await store.appendLog(
-            SyncLogEntry(
-                level: .info,
-                message: "Queued \(payload.metrics.count) metrics, \(payload.workouts.count) workouts, and \(payload.deletions.count) deletions."
-            )
-        )
+        try await store.appendLog(SyncLogEntry(level: .info, message: SyncLogMessages.queued(payload, destination: destination)))
         return batch
     }
 
@@ -48,6 +58,7 @@ actor SyncEngine {
 
         do {
             let pending = try await store.pendingBatches()
+                .filter { $0.destination == configuration.destination }
             return await upload(batches: pending, configuration: configuration)
         } catch {
             let message = safeMessage(from: error, token: configuration.token)
@@ -80,14 +91,20 @@ actor SyncEngine {
                     messages.append("Sync cancelled. Queued uploads will retry.")
                     break
                 }
+                guard !configuration.destination.isEmpty, batch.destination == configuration.destination else {
+                    failed += 1
+                    let message = SyncLogMessages.destinationMismatch(batch: batch, configuration: configuration)
+                    messages.append(message)
+                    try? await store.appendLog(SyncLogEntry(level: .error, message: message))
+                    continue
+                }
                 do {
                     let result = try await uploader.upload(batch: batch, configuration: configuration)
                     guard result.ok else { throw APIClientError.invalidResponse }
                     try await store.markBatchUploaded(id: batch.id, result: result)
                     try await store.recordSyncSuccess(at: Date())
                     uploaded += 1
-                    let workspaceDetail = result.workspaceID.map { " to workspace \($0)" } ?? ""
-                    let message = "Uploaded batch \(batch.payload.exportID.uuidString)\(workspaceDetail) (\(result.received) received, \(result.duplicates) duplicates, \(result.deleted) deleted)."
+                    let message = SyncLogMessages.uploaded(batch, result: result)
                     messages.append(message)
                     try await store.appendLog(SyncLogEntry(level: .success, message: message))
                 } catch {
@@ -190,9 +207,9 @@ actor IncrementalSyncRunner {
             workoutSamples: samples.workoutSamples, deletions: deletions)
         guard !payload.isEmpty else { return [] }
         try Task.checkCancellation()
-        let batches = try await store.enqueuePayloadChunks(payload, maxRecords: 100)
+        let batches = try await store.enqueuePayloadChunks(payload, destination: configuration.destination, maxRecords: 100)
         try await store.appendLog(SyncLogEntry(level: .info,
-            message: "Queued \(payload.metrics.count) metrics, \(payload.workouts.count) workouts, and \(payload.deletions.count) deletions."))
+            message: SyncLogMessages.queued(payload, destination: configuration.destination)))
         return batches
     }
 
@@ -206,7 +223,7 @@ actor IncrementalSyncRunner {
     }
 
     private func retryPending(configuration: UploadConfiguration, now: Date, calendar: Calendar) async throws {
-        let pending = try await store.pendingBatches()
+        let pending = try await store.pendingBatches().filter { $0.destination == configuration.destination }
         let unattempted = Array(pending.filter { $0.attemptCount == 0 }.prefix(3))
         try await upload(unattempted, configuration: configuration)
         if let stale = pending.first(where: { $0.attemptCount > 0 }),

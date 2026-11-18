@@ -139,7 +139,7 @@ struct HealthPermissionSettingsPresentation: Equatable {
 }
 
 struct SettingsOverviewPresentation: Equatable {
-    let storageMode: StorageMode
+    let storageMode: StorageMode?
     let permissionSummary: String
     let selectedHealthDataCount: Int
     let totalHealthDataCount: Int
@@ -151,6 +151,8 @@ struct SettingsOverviewPresentation: Equatable {
             "Custom backend"
         case .hostedHealthSync:
             "Hosted storage"
+        case nil:
+            "No destination"
         }
     }
 
@@ -160,6 +162,8 @@ struct SettingsOverviewPresentation: Equatable {
             "Uploads use your configured endpoint."
         case .hostedHealthSync:
             "Uploads use managed HealthSync storage."
+        case nil:
+            "Nothing uploads until you choose a destination."
         }
     }
 
@@ -323,7 +327,7 @@ struct SettingsView: View {
         ) {
             SettingsPickerRow(
                 title: "Mode",
-                detail: appState.settings.storageMode.label,
+                detail: appState.settings.storageMode?.label ?? "Not chosen",
                 systemImage: "externaldrive.connected.to.line.below",
                 color: .purple
             ) {
@@ -360,7 +364,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var manualBackendCard: some View {
-        if appState.settings.storageMode.showsManualBackendSettings {
+        if appState.settings.storageMode?.showsManualBackendSettings == true {
             SettingsCard(
                 title: "Backend Configuration",
                 subtitle: "Point HealthSync at your own ingestion endpoint.",

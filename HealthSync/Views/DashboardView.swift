@@ -138,10 +138,12 @@ struct DashboardView: View {
                             
                             MetricCard(
                                 title: "Storage Destination",
-                                value: appState.settings.storageMode == .hostedHealthSync ? "Hosted" : "Custom",
+                                value: appState.settings.storageMode == .hostedHealthSync ? "Hosted"
+                                    : appState.settings.storageMode == .customBackend ? "Custom" : "Not set",
                                 icon: "server.rack",
                                 iconColor: .purple,
-                                subtitle: appState.settings.storageMode == .hostedHealthSync ? "Managed storage" : "Custom backend"
+                                subtitle: appState.settings.uploadDestination.map { UploadConfiguration.host(of: $0) }
+                                    ?? "Choose in Settings"
                             )
                         }
                         

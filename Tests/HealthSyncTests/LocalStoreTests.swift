@@ -7,6 +7,7 @@ final class LocalStoreTests: XCTestCase {
         let url = temporaryDatabaseURL()
         let store = try SQLiteLocalStore(url: url)
         var original = AppSettings.default
+        original.storageMode = .hostedHealthSync
         original.backendURL = "https://dtzydnjnqkruxaacgkio.supabase.co/functions/v1/healthsync"
         original.hostedAgentEndpoint = original.backendURL + "/api/agent/health-data?limit=50&tag=a%2Fb"
         original.hostedWorkspaceID = "wk_existing_migration_fixture"
@@ -154,7 +155,7 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
         defer { sqlite3_close(db) }
         var statement: OpaquePointer?
-        XCTAssertEqual(sqlite3_prepare_v2(db, "INSERT INTO batches VALUES (?, ?, ?, NULL, 1, 'Timed out')", -1, &statement, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_prepare_v2(db, "INSERT INTO batches (id, payload_json, created_at, uploaded_at, attempt_count, last_error, destination) VALUES (?, ?, ?, NULL, 1, 'Timed out', '\(original.destination)')", -1, &statement, nil), SQLITE_OK)
         defer { sqlite3_finalize(statement) }
         let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
         sqlite3_bind_text(statement, 1, UUID().uuidString, -1, transient)
@@ -186,7 +187,7 @@ final class LocalStoreTests: XCTestCase {
         defer { sqlite3_close(db) }
         XCTAssertEqual(sqlite3_exec(db, "CREATE TRIGGER reject_new BEFORE INSERT ON batches WHEN NEW.payload_json LIKE '%reject-new%' BEGIN SELECT RAISE(ABORT, 'disk write failed'); END", nil, nil, nil), SQLITE_OK)
         do {
-            try await store.enqueueBatch(SyncBatch(payload: newPayload))
+            try await store.enqueueBatch(SyncBatch(payload: newPayload, destination: "https://example.com"))
             XCTFail("A failed replacement must leave the older data durable")
         } catch {}
         let reopened = try SQLiteLocalStore(url: url)
@@ -218,15 +219,15 @@ final class LocalStoreTests: XCTestCase {
         }
         return SyncBatch(payload: SyncPayload(deviceID: "existing-device", exportID: UUID(), generatedAt: start,
             timezone: "UTC", source: "ios-healthkit", schemaVersion: 1, dateRange: SyncDateRange(start: start, end: start),
-            metrics: metrics, workouts: []), createdAt: start, attemptCount: 8, lastError: "Timed out")
+            metrics: metrics, workouts: []), destination: "https://example.com", createdAt: start, attemptCount: 8, lastError: "Timed out")
     }
 
     func testFreshBatchesPrecedeFailedBatchesAndSurviveReopening() async throws {
         let url = temporaryDatabaseURL()
         let store = try SQLiteLocalStore(url: url)
         let payload = SyncPayload.empty(deviceID: "existing-device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC")
-        let stale = SyncBatch(payload: payload, createdAt: Date(timeIntervalSince1970: 1), attemptCount: 2)
-        let fresh = SyncBatch(payload: payload, createdAt: Date(timeIntervalSince1970: 2))
+        let stale = SyncBatch(payload: payload, destination: "https://example.com", createdAt: Date(timeIntervalSince1970: 1), attemptCount: 2)
+        let fresh = SyncBatch(payload: payload, destination: "https://example.com", createdAt: Date(timeIntervalSince1970: 2))
         try await store.enqueueBatch(stale)
         try await store.enqueueBatch(fresh)
         try await store.saveAnchor("existing-anchor", for: .workouts)
@@ -293,11 +294,13 @@ final class LocalStoreTests: XCTestCase {
                 workouts: [],
                 deletions: deletionIDs.map { HealthRecordDeletion(id: $0, kind: .metric) })
         }
-        let uploaded = SyncBatch(payload: payload(metricIDs: ["uploaded:1", "uploaded:2", "uploaded:3"]))
+        let uploaded = SyncBatch(payload: payload(metricIDs: ["uploaded:1", "uploaded:2", "uploaded:3"]),
+            destination: AppSettings.hostedBackendURL)
         try await store.enqueueBatch(uploaded)
         try await store.markBatchUploaded(id: uploaded.id, result: UploadResult(ok: true, received: 3, duplicates: 0))
         try await store.enqueueBatch(legacyBatch())
-        try await store.enqueueBatch(SyncBatch(payload: payload(metricIDs: [], deletionIDs: ["gone:1", "gone:2"])))
+        try await store.enqueueBatch(SyncBatch(payload: payload(metricIDs: [], deletionIDs: ["gone:1", "gone:2"]),
+            destination: AppSettings.hostedBackendURL))
         try await store.saveAnchor("kept-anchor", for: .stepCount)
 
         let before = try await store.syncStatus()
@@ -333,6 +336,37 @@ final class LocalStoreTests: XCTestCase {
             ids.append(String(cString: text))
         }
         return ids
+    }
+
+    func testQueueFromBeforeDestinationsKeepsTheSavedDestinationAndOtherDestinationsAreDiscarded() async throws {
+        let url = temporaryDatabaseURL()
+        var settings = AppSettings.default
+        settings.storageMode = .hostedHealthSync
+        let settingsJSON = String(data: try JSONEncoder().encode(settings), encoding: .utf8)!
+        let payload = SyncPayload.empty(deviceID: "existing-device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC")
+        let payloadJSON = String(data: try PayloadJSON.encoder.encode(payload), encoding: .utf8)!
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        for sql in [
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            "CREATE TABLE batches (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, created_at REAL NOT NULL, uploaded_at REAL, attempt_count INTEGER NOT NULL, last_error TEXT)",
+            "INSERT INTO settings VALUES ('app_settings', '\(settingsJSON)')",
+            "INSERT INTO batches VALUES ('\(UUID().uuidString)', '\(payloadJSON)', 1, NULL, 0, NULL)"
+        ] {
+            XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK, sql)
+        }
+        sqlite3_close(db)
+
+        let store = try SQLiteLocalStore(url: url)
+        let migrated = try await store.pendingBatches()
+        XCTAssertEqual(migrated.map(\.destination), [AppSettings.hostedBackendURL])
+        XCTAssertEqual(migrated.first?.payload.exportID, payload.exportID)
+
+        try await store.enqueueBatch(SyncBatch(payload: payload, destination: "https://mine.example"))
+        let discarded = try await store.discardPendingBatches(notFor: "https://mine.example")
+        let remaining = try await store.pendingBatches()
+        XCTAssertEqual(discarded, 1)
+        XCTAssertEqual(remaining.map(\.destination), ["https://mine.example"])
     }
 
     private func temporaryDatabaseURL() -> URL {

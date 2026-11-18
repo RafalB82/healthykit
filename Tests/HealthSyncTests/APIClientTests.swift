@@ -75,7 +75,7 @@ final class PopulatedWorkoutExportTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let database = directory.appendingPathComponent("queue.sqlite")
         let queue = try SQLiteLocalStore(url: database)
-        try await queue.enqueueBatch(SyncBatch(payload: payload, createdAt: end))
+        try await queue.enqueueBatch(SyncBatch(payload: payload, destination: "https://example.com", createdAt: end))
         let reopened = try SQLiteLocalStore(url: database)
         let pending = try await reopened.pendingBatches()
         XCTAssertEqual(pending.count, 1)
@@ -560,10 +560,28 @@ final class AppSettingsHostedEndpointTests: XCTestCase {
         }
     }
 
-    func testCleanInstallDefaultsToHostedStorageSoManualSyncHasASetupPath() {
-        XCTAssertEqual(AppSettings.default.storageMode, .hostedHealthSync)
-        XCTAssertEqual(AppSettings.default.effectiveBackendURL, AppSettings.hostedBackendURL)
+    func testCleanInstallHasNoStorageDestinationUntilTheUserChoosesOne() throws {
+        XCTAssertNil(AppSettings.default.storageMode)
+        XCTAssertNil(AppSettings.default.uploadDestination)
+        XCTAssertEqual(AppSettings.default.effectiveBackendURL, "")
         XCTAssertEqual(AppSettings.default.syncFrequency, .hourlyBestEffort)
+
+        // A saved fresh install must not reload as a legacy custom-backend user (or anything else).
+        let reloaded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(AppSettings.default))
+        XCTAssertNil(reloaded.storageMode)
+    }
+
+    func testSavedDestinationsReloadUnchangedAndPreHostedSettingsStayCustom() throws {
+        for mode in [StorageMode.customBackend, .hostedHealthSync] {
+            var settings = AppSettings.default
+            settings.storageMode = mode
+            let reloaded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+            XCTAssertEqual(reloaded.storageMode, mode)
+        }
+        let preHosted = #"{"backendURL":"https://mine.example","selectedTypes":["step_count"],"syncFrequency":"manualOnly","hasRequestedHealthPermissions":true}"#
+        let legacy = try JSONDecoder().decode(AppSettings.self, from: Data(preHosted.utf8))
+        XCTAssertEqual(legacy.storageMode, .customBackend)
+        XCTAssertEqual(legacy.uploadDestination, "https://mine.example")
     }
 
     func testFreshInstallSelectsOnlyTheDocumentedCoreHealthDataTypes() {
@@ -711,7 +729,7 @@ final class AppSettingsHostedEndpointTests: XCTestCase {
 }
 
 final class UploadDestinationPreparationTests: XCTestCase {
-    func testHostedStorageWithoutCredentialsRequiresAutomaticProvisioning() {
+    func testHostedStorageWithoutCredentialsNeedsProvisioningWhenTheUserOptsIn() {
         XCTAssertEqual(
             UploadDestinationPreparation.resolve(
                 storageMode: .hostedHealthSync,
@@ -746,10 +764,10 @@ final class UploadDestinationPreparationTests: XCTestCase {
 }
 
 final class OnboardingStorageDisclosureTests: XCTestCase {
-    func testDisclosureExplainsAutomaticHostedStorageBeforeHealthAccess() {
+    func testDisclosureSaysNothingLeavesThePhoneBeforeADestinationIsChosen() {
         XCTAssertEqual(
             OnboardingStorageDisclosure.message,
-            "Continue creates private hosted storage, then requests Health access. You can switch to your own backend later."
+            "Nothing leaves your iPhone until you choose where it goes: your own backend or hosted HealthSync storage."
         )
     }
 }
@@ -1203,7 +1221,7 @@ final class UploadTransportRecoveryTests: XCTestCase {
         }
         let payload = SyncPayload.empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC")
         do {
-            _ = try await APIClient(session: session).upload(batch: SyncBatch(payload: payload), configuration: UploadConfiguration(baseURL: "https://example.com", token: "test", deviceID: "device", appVersion: "1.0.1"))
+            _ = try await APIClient(session: session).upload(batch: SyncBatch(payload: payload, destination: "https://example.com"), configuration: UploadConfiguration(baseURL: "https://example.com", token: "test", deviceID: "device", appVersion: "1.0.1"))
             XCTFail("Cancellation must propagate")
         } catch {
             XCTAssertTrue(error is CancellationError)
@@ -1243,7 +1261,7 @@ final class UploadTransportRecoveryTests: XCTestCase {
         let payload = SyncPayload(deviceID: "device", exportID: UUID(), generatedAt: date, timezone: "UTC", source: "ios-healthkit", schemaVersion: 1, dateRange: SyncDateRange(start: date, end: date), metrics: [metric], workouts: [])
         let configuration = UploadConfiguration(baseURL: "https://example.com", token: "test", deviceID: "device", appVersion: "1.0.1")
         let engine = SyncEngine(store: store, uploader: APIClient(session: session, maxAttempts: 1))
-        _ = try await engine.queue(payload: payload)
+        _ = try await engine.queue(payload: payload, destination: "https://example.com")
         let first = await engine.uploadPending(configuration: configuration)
         XCTAssertEqual(first.failedCount, 1)
         let reopened = try SQLiteLocalStore(url: url)

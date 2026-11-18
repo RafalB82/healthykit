@@ -71,28 +71,40 @@ actor SQLiteLocalStore: BatchPersisting {
     }
 
     func enqueueBatch(_ batch: SyncBatch) async throws {
-        try replaceSupersededRecords(with: batch.payload, batches: [batch])
+        try replaceSupersededRecords(with: batch.payload, destination: batch.destination, batches: [batch])
     }
 
-    func enqueuePayloadChunks(_ payload: SyncPayload, maxRecords: Int) throws -> [SyncBatch] {
-        let batches = payload.chunked(maxRecords: maxRecords).map { SyncBatch(payload: $0) }
-        try replaceSupersededRecords(with: payload, batches: batches)
+    func enqueuePayloadChunks(_ payload: SyncPayload, destination: String, maxRecords: Int) throws -> [SyncBatch] {
+        let batches = payload.chunked(maxRecords: maxRecords).map { SyncBatch(payload: $0, destination: destination) }
+        try replaceSupersededRecords(with: payload, destination: destination, batches: batches)
         return batches
     }
 
-    private func replaceSupersededRecords(with payload: SyncPayload, batches: [SyncBatch]) throws {
+    /// Deletes queued batches that were not queued for `destination`, so a destination switch never sends
+    /// them elsewhere. Returns how many were deleted.
+    @discardableResult
+    func discardPendingBatches(notFor destination: String) throws -> Int {
+        let statement = try prepare("DELETE FROM batches WHERE uploaded_at IS NULL AND destination <> ?")
+        defer { sqlite3_finalize(statement) }
+        try bindText(destination, to: statement, at: 1)
+        try stepDone(statement)
+        return Int(sqlite3_changes(db))
+    }
+
+    private func replaceSupersededRecords(with payload: SyncPayload, destination: String, batches: [SyncBatch]) throws {
         let metricIDs = Set(payload.metrics.map(\.id))
             .union(payload.deletions.filter { $0.kind == .metric }.map(\.id))
         let workoutIDs = Set(payload.workouts.map(\.id))
             .union(payload.deletions.filter { $0.kind == .workout }.map(\.id))
         try Self.execute("BEGIN IMMEDIATE", db: db)
         do {
-            for pending in try readPendingBatches() where pending.payload.deviceID == payload.deviceID {
+            for pending in try readPendingBatches()
+            where pending.payload.deviceID == payload.deviceID && pending.destination == destination {
                 let remaining = pending.payload.excludingRecords(metricIDs: metricIDs, workoutIDs: workoutIDs)
                 guard remaining != pending.payload else { continue }
                 try deleteBatch(id: pending.id)
                 if !remaining.isEmpty {
-                    try insertBatch(SyncBatch(payload: remaining, createdAt: pending.createdAt))
+                    try insertBatch(SyncBatch(payload: remaining, destination: pending.destination, createdAt: pending.createdAt))
                 }
             }
             for batch in batches {
@@ -111,8 +123,8 @@ actor SQLiteLocalStore: BatchPersisting {
             throw SQLiteStoreError.encodingFailed
         }
         let sql = """
-        INSERT INTO batches (id, payload_json, created_at, uploaded_at, attempt_count, last_error)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO batches (id, payload_json, created_at, uploaded_at, attempt_count, last_error, destination)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -130,6 +142,7 @@ actor SQLiteLocalStore: BatchPersisting {
         } else {
             sqlite3_bind_null(statement, 6)
         }
+        try bindText(batch.destination, to: statement, at: 7)
         try stepDone(statement)
     }
 
@@ -139,7 +152,7 @@ actor SQLiteLocalStore: BatchPersisting {
 
     private func readPendingBatches(oldestFirst: Bool = false) throws -> [SyncBatch] {
         let sql = """
-        SELECT id, payload_json, created_at, uploaded_at, attempt_count, last_error
+        SELECT id, payload_json, created_at, uploaded_at, attempt_count, last_error, destination
         FROM batches
         WHERE uploaded_at IS NULL
         ORDER BY \(oldestFirst ? "created_at ASC, rowid ASC" : "attempt_count ASC, created_at ASC, rowid ASC")
@@ -162,7 +175,7 @@ actor SQLiteLocalStore: BatchPersisting {
             try Self.execute("BEGIN IMMEDIATE", db: db)
             do {
                 for payload in chunks {
-                    try insertBatch(SyncBatch(payload: payload, createdAt: batch.createdAt))
+                    try insertBatch(SyncBatch(payload: payload, destination: batch.destination, createdAt: batch.createdAt))
                 }
                 try deleteBatch(id: batch.id)
                 try Self.execute("COMMIT", db: db)
@@ -179,7 +192,8 @@ actor SQLiteLocalStore: BatchPersisting {
             var metricIDs: [String: Set<String>] = [:]
             var workoutIDs: [String: Set<String>] = [:]
             for batch in try readPendingBatches(oldestFirst: true).reversed() {
-                let device = batch.payload.deviceID
+                // Newer records only supersede older ones bound for the same destination.
+                let device = batch.payload.deviceID + "\n" + batch.destination
                 let remaining = batch.payload.excludingRecords(metricIDs: metricIDs[device, default: []], workoutIDs: workoutIDs[device, default: []])
                 metricIDs[device, default: []].formUnion(batch.payload.metrics.map(\.id))
                 workoutIDs[device, default: []].formUnion(batch.payload.workouts.map(\.id))
@@ -193,7 +207,7 @@ actor SQLiteLocalStore: BatchPersisting {
                 guard remaining != batch.payload else { continue }
                 try deleteBatch(id: batch.id)
                 if !remaining.isEmpty {
-                    try insertBatch(SyncBatch(payload: remaining, createdAt: batch.createdAt))
+                    try insertBatch(SyncBatch(payload: remaining, destination: batch.destination, createdAt: batch.createdAt))
                 }
             }
             try Self.execute("COMMIT", db: db)
@@ -325,9 +339,11 @@ actor SQLiteLocalStore: BatchPersisting {
             created_at REAL NOT NULL,
             uploaded_at REAL,
             attempt_count INTEGER NOT NULL,
-            last_error TEXT
+            last_error TEXT,
+            destination TEXT NOT NULL DEFAULT ''
         )
         """, db: db)
+        try migrateBatchDestinations(db: db)
         try execute("""
         CREATE TABLE IF NOT EXISTS logs (
             id TEXT PRIMARY KEY,
@@ -336,6 +352,45 @@ actor SQLiteLocalStore: BatchPersisting {
             message TEXT NOT NULL
         )
         """, db: db)
+    }
+
+    /// Databases from before destinations were recorded get the column added. Their queued batches were all
+    /// queued for the destination saved in settings, so they keep it; without one they never upload.
+    private static func migrateBatchDestinations(db: OpaquePointer?) throws {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT 1 FROM pragma_table_info('batches') WHERE name = 'destination'", -1, &statement, nil) == SQLITE_OK else {
+            throw SQLiteStoreError.statementFailed(message(from: db))
+        }
+        let hasColumn = sqlite3_step(statement) == SQLITE_ROW
+        sqlite3_finalize(statement)
+        guard !hasColumn else { return }
+
+        var destination = ""
+        if sqlite3_prepare_v2(db, "SELECT value FROM settings WHERE key = 'app_settings'", -1, &statement, nil) == SQLITE_OK,
+           sqlite3_step(statement) == SQLITE_ROW,
+           let text = sqlite3_column_text(statement, 0),
+           var settings = try? JSONDecoder().decode(AppSettings.self, from: Data(String(cString: text).utf8)) {
+            settings.migrateHostedEndpoints()
+            destination = settings.uploadDestination ?? ""
+        }
+        sqlite3_finalize(statement)
+
+        try execute("BEGIN IMMEDIATE", db: db)
+        do {
+            try execute("ALTER TABLE batches ADD COLUMN destination TEXT NOT NULL DEFAULT ''", db: db)
+            guard sqlite3_prepare_v2(db, "UPDATE batches SET destination = ?", -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.statementFailed(message(from: db))
+            }
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_text(statement, 1, destination, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw SQLiteStoreError.statementFailed(message(from: db))
+            }
+            try execute("COMMIT", db: db)
+        } catch {
+            try? execute("ROLLBACK", db: db)
+            throw error
+        }
     }
 
     private static func execute(_ sql: String, db: OpaquePointer?) throws {
@@ -420,6 +475,7 @@ actor SQLiteLocalStore: BatchPersisting {
         return SyncBatch(
             id: id,
             payload: payload,
+            destination: columnText(statement, 6),
             createdAt: createdAt,
             uploadedAt: uploadedAt,
             attemptCount: attemptCount,
