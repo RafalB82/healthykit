@@ -5,6 +5,10 @@ protocol TokenProviding {
     func readToken() throws -> String?
     func saveToken(_ token: String) throws
     func deleteToken() throws
+    func readHostedIngestToken() throws -> String?
+    func saveHostedIngestToken(_ token: String) throws
+    func readHostedAgentToken() throws -> String?
+    func saveHostedAgentToken(_ token: String) throws
 }
 
 enum KeychainError: LocalizedError {

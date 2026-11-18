@@ -213,6 +213,21 @@ struct SettingsView: View {
                     .padding(16)
                     .safeAreaPadding(.bottom, 32)
                 }
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if let feedback = appState.backendFeedback {
+                        SettingsInfoBanner(
+                            text: feedback.message,
+                            systemImage: feedback.kind.systemImage,
+                            color: feedback.kind.color
+                        )
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(feedback.message)
+                        .accessibilityIdentifier("backend-feedback")
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(.bar)
+                    }
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -315,7 +330,7 @@ struct SettingsView: View {
                 Menu {
                     ForEach(StorageMode.allCases) { mode in
                         Button {
-                            appState.settings.storageMode = mode
+                            Task { await appState.setStorageMode(mode) }
                         } label: {
                             HStack {
                                 Text(mode.label)
@@ -333,6 +348,7 @@ struct SettingsView: View {
                         .background(Color.primary.opacity(0.05))
                         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 }
+                .disabled(appState.isSavingSettings || (appState.isBusy && !appState.canStopSync))
             }
 
             if appState.settings.storageMode == .hostedHealthSync {
@@ -360,6 +376,7 @@ struct SettingsView: View {
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
+                        .disabled(appState.isSavingSettings)
                 }
 
                 SettingsInputRow(
@@ -370,6 +387,7 @@ struct SettingsView: View {
                     SecureField(appState.hasStoredToken ? "New token (stored)" : "Auth token", text: $appState.authTokenDraft)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .disabled(appState.isSavingSettings)
                 }
 
                 HStack(spacing: 10) {
@@ -379,16 +397,30 @@ struct SettingsView: View {
                         Label("Save", systemImage: "square.and.arrow.down")
                     }
                     .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: true))
+                    .disabled(appState.isSavingSettings)
 
-                    Button {
-                        Task { await appState.testConnection() }
-                    } label: {
-                        Label("Test", systemImage: "network")
-                    }
-                    .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: false))
+                    testConnectionButton("Test")
                 }
             }
         }
+    }
+
+    private func testConnectionButton(_ title: String) -> some View {
+        Button {
+            Task { await appState.testConnection() }
+        } label: {
+            if appState.isTestingConnection {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Testing…")
+                }
+            } else {
+                Label(title, systemImage: "network")
+            }
+        }
+        .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: false))
+        .disabled(appState.isTestingConnection || appState.isSavingSettings)
     }
 
     private var appleHealthCard: some View {
@@ -606,6 +638,7 @@ struct SettingsView: View {
                         .background(Color.primary.opacity(0.05))
                         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 }
+                .disabled(appState.isSavingSettings)
             }
 
             Button {
@@ -614,6 +647,7 @@ struct SettingsView: View {
                 Label("Apply frequency", systemImage: "clock.arrow.circlepath")
             }
             .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.successGreen, filled: false))
+            .disabled(appState.isSavingSettings)
 
             SettingsDivider()
 
@@ -681,14 +715,9 @@ struct SettingsView: View {
             .disabled(presentation.isCreateButtonDisabled)
             .accessibilityIdentifier("create-hosted-storage-button")
 
-            Button {
-                Task { await appState.testConnection() }
-            } label: {
-                Label("Test hosted connection", systemImage: "network")
-            }
-            .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: false))
-            .disabled(appState.isBusy || !appState.hasStoredToken)
-            .accessibilityIdentifier("test-hosted-connection-button")
+            testConnectionButton("Test hosted connection")
+                .disabled((appState.isBusy && !appState.canStopSync) || !appState.hasStoredToken)
+                .accessibilityIdentifier("test-hosted-connection-button")
 
             if presentation.showsResetButton {
                 Button(role: .destructive) {

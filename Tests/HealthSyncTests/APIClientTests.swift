@@ -872,6 +872,59 @@ final class HealthActionFeedbackTests: XCTestCase {
     }
 }
 
+@MainActor
+final class SettingsSaveWhileSyncingTests: XCTestCase {
+    func testSaveAndTestAreNotBlockedByBusyWork() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storeURL = directory.appendingPathComponent("test.sqlite")
+        let keychain = MemoryKeychain()
+        let appState = AppState(storeURL: storeURL, keychain: keychain)
+        await appState.bootstrap()
+        await appState.setStorageMode(.customBackend)
+
+        appState.isBusy = true
+        appState.settings.backendURL = "https://health.example.com"
+        appState.authTokenDraft = "token-saved-during-sync"
+        await appState.saveSettingsAndToken()
+
+        let store = try SQLiteLocalStore(url: storeURL)
+        let saved = try await store.loadSettings()
+        XCTAssertEqual(saved.storageMode, .customBackend)
+        XCTAssertEqual(saved.backendURL, "https://health.example.com")
+        XCTAssertEqual(keychain.readToken(), "token-saved-during-sync")
+        XCTAssertEqual(appState.authTokenDraft, "")
+        XCTAssertEqual(appState.backendFeedback?.kind, .success)
+        XCTAssertTrue(appState.isBusy)
+
+        appState.settings.backendURL = ""
+        await appState.testConnection()
+        XCTAssertEqual(appState.backendFeedback?.kind, .error)
+        XCTAssertFalse(appState.isTestingConnection)
+
+        appState.isBusy = false
+        await appState.setStorageMode(.hostedHealthSync)
+        let hosted = try await store.loadSettings()
+        XCTAssertEqual(hosted.storageMode, .hostedHealthSync)
+        XCTAssertEqual(appState.backendFeedback?.kind, .success)
+    }
+
+    private final class MemoryKeychain: TokenProviding {
+        private var token: String?
+        private var hostedIngestToken: String?
+        private var hostedAgentToken: String?
+
+        func readToken() -> String? { token }
+        func saveToken(_ token: String) { self.token = token }
+        func deleteToken() { token = nil }
+        func readHostedIngestToken() -> String? { hostedIngestToken }
+        func saveHostedIngestToken(_ token: String) { hostedIngestToken = token }
+        func readHostedAgentToken() -> String? { hostedAgentToken }
+        func saveHostedAgentToken(_ token: String) { hostedAgentToken = token }
+    }
+}
+
 final class DashboardMetricDateFormatterTests: XCTestCase {
     func testDisplayValueUsesShortReadableDateForCompactMetricCards() throws {
         let timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Kolkata"))

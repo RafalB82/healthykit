@@ -172,22 +172,31 @@ final class AppState: ObservableObject {
     @Published var backfillError: String?
     @Published var lastError: String?
     @Published var actionFeedback: HealthActionFeedback?
+    @Published private(set) var backendFeedback: HealthActionFeedback?
+    @Published private(set) var isSavingSettings = false
+    @Published private(set) var isTestingConnection = false
     /// True while a sync or backfill runs, so the UI offers Stop sync.
     @Published private(set) var canStopSync = false
     @Published private(set) var isStoppingSync = false
 
+    private let storeURL: URL?
     private var store: SQLiteLocalStore?
     private var syncEngine: SyncEngine?
     private var incrementalSyncRunner: IncrementalSyncRunner?
     private let healthKit = HealthKitManager()
     private let normalizer = HealthNormalizer()
-    private let keychain = KeychainStore()
+    private let keychain: any TokenProviding
     private let backgroundSyncScheduler = BackgroundSyncScheduler()
     private var periodicSyncTask: Task<Void, Never>?
     /// The one handle for the current busy operation; `stopSync()` cancels it.
     private var busyOperation: Task<Void, Never>?
     private var bootstrapTask: Task<Void, Never>?
     private var pendingIncrementalWaiters: [CheckedContinuation<Bool, Never>] = []
+
+    init(storeURL: URL? = nil, keychain: any TokenProviding = KeychainStore()) {
+        self.storeURL = storeURL
+        self.keychain = keychain
+    }
 
     func bootstrap() async {
         if let bootstrapTask {
@@ -205,7 +214,7 @@ final class AppState: ObservableObject {
 
     private func performBootstrap() async {
         do {
-            let localStore = try SQLiteLocalStore()
+            let localStore = try SQLiteLocalStore(url: storeURL)
             store = localStore
             syncEngine = SyncEngine(store: localStore)
             incrementalSyncRunner = IncrementalSyncRunner(store: localStore, reader: healthKit)
@@ -261,16 +270,47 @@ final class AppState: ObservableObject {
         }
     }
 
+    func setStorageMode(_ mode: StorageMode) async {
+        guard settings.storageMode != mode, !isSavingSettings, !isBusy || canStopSync else { return }
+        settings.storageMode = mode
+        await saveSettingsAndToken()
+    }
+
     func saveSettingsAndToken() async {
-        await runBusy { [self] in
+        guard !isSavingSettings else { return }
+        isSavingSettings = true
+        backendFeedback = nil
+        defer { isSavingSettings = false }
+
+        do {
+            guard let store else { throw APIClientError.invalidResponse }
+            let previous = try await store.loadSettings()
+            let token = authTokenDraft
+            let savedNewToken = !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let destinationChanged = previous.storageMode != settings.storageMode
+                || previous.effectiveBackendURL != settings.effectiveBackendURL
+                || (settings.storageMode == .customBackend && savedNewToken)
+            let frequencyChanged = previous.syncFrequency != settings.syncFrequency
             try await saveSettingsOnly()
-            if !authTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                try keychain.saveToken(authTokenDraft)
+            if savedNewToken {
+                try keychain.saveToken(token)
                 authTokenDraft = ""
-                hasStoredToken = true
             }
+            var message = "Settings saved."
+            if destinationChanged && canStopSync {
+                await stopSync()
+                message += " The running sync was stopped so new uploads use this destination."
+            }
+            hasStoredToken = try DevelopmentKeychainBypass.hasStoredToken {
+                try hasTokenForCurrentStorageMode()
+            }
+            backendFeedback = HealthActionFeedback(kind: .success, message: message)
             await startObserversIfPossible()
-            restartPeriodicSync()
+            if destinationChanged || frequencyChanged {
+                restartPeriodicSync()
+            }
+        } catch {
+            backendFeedback = .failure(userMessage(from: error))
         }
     }
 
@@ -376,7 +416,14 @@ final class AppState: ObservableObject {
     }
 
     func testConnection() async {
-        await runBusy { [self] in
+        guard !isTestingConnection else { return }
+        isTestingConnection = true
+        backendFeedback = nil
+        defer { isTestingConnection = false }
+
+        let testedMode = settings.storageMode
+        let feedback: HealthActionFeedback
+        do {
             guard let store else { throw APIClientError.invalidResponse }
             let configuration = try await uploadConfiguration()
             let now = Date()
@@ -389,8 +436,16 @@ final class AppState: ObservableObject {
             try await store.appendLog(
                 SyncLogEntry(level: .success, message: "Connection accepted (\(result.received) received, \(result.duplicates) duplicates).")
             )
-            await refresh()
+            feedback = HealthActionFeedback(kind: .success, message: "Connection works. The backend accepted a test upload.")
+        } catch {
+            let message = userMessage(from: error)
+            feedback = .failure("Connection test failed: \(message)")
+            try? await store?.appendLog(SyncLogEntry(level: .error, message: message))
         }
+        if settings.storageMode == testedMode {
+            backendFeedback = feedback
+        }
+        await refresh()
     }
 
     func syncLast24Hours() async {
