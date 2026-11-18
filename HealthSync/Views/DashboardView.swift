@@ -25,6 +25,7 @@ struct HealthPermissionPromptPresentation: Equatable {
 
 struct DashboardView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var isConfirmingClearQueue = false
 
     private let columns = [
         GridItem(.flexible(), spacing: 16),
@@ -59,6 +60,24 @@ struct DashboardView: View {
                             )
                         }
                         .padding(.horizontal, 4)
+
+                        if appState.canStopSync {
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Sync in progress")
+                                            .font(.headline)
+                                        Text("Stopping keeps unsent records in the pending queue.")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                StopSyncButton()
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .healthCardStyle(padding: 16)
+                        }
                         
                         if let error = appState.status.lastError ?? appState.lastError {
                             VStack(alignment: .leading, spacing: 8) {
@@ -108,10 +127,12 @@ struct DashboardView: View {
                             
                             MetricCard(
                                 title: "Pending Queue",
-                                value: "\(appState.status.pendingUploadCount)",
+                                value: PendingQueueLabel.records(appState.status.pendingRecordCount),
                                 icon: "tray.and.arrow.up.fill",
                                 iconColor: appState.status.pendingUploadCount > 0 ? HealthSyncTheme.warningOrange : .secondary,
-                                subtitle: appState.status.pendingUploadCount > 0 ? "Retrying network" : "All uploads clear"
+                                subtitle: appState.status.pendingUploadCount > 0
+                                    ? "In \(PendingQueueLabel.batches(appState.status.pendingUploadCount))"
+                                    : "All uploads clear"
                             )
                             
                             MetricCard(
@@ -161,6 +182,10 @@ struct DashboardView: View {
                                 gradient: appState.isBusy ? HealthSyncTheme.disabledGradient : HealthSyncTheme.stepsGradient
                             ))
                             .disabled(appState.isBusy)
+
+                            if appState.status.pendingUploadCount > 0 {
+                                pendingQueueRow
+                            }
                             
                             Divider()
                                 .padding(.vertical, 4)
@@ -293,6 +318,48 @@ struct DashboardView: View {
         }
     }
 
+    private var pendingQueueRow: some View {
+        let status = appState.status
+        return HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Pending queue")
+                    .font(.subheadline.weight(.semibold))
+                Text("\(PendingQueueLabel.records(status.pendingRecordCount)) in \(PendingQueueLabel.batches(status.pendingUploadCount)) waiting to upload.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button(role: .destructive) {
+                isConfirmingClearQueue = true
+            } label: {
+                Text("Clear")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(HealthSyncTheme.primaryRed.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(HealthSyncTheme.primaryRed)
+            .disabled(appState.isBusy)
+            .opacity(appState.isBusy ? 0.45 : 1)
+            .accessibilityLabel("Clear pending queue")
+            .accessibilityIdentifier("clear-pending-queue-button")
+        }
+        .confirmationDialog(
+            "Clear pending queue?",
+            isPresented: $isConfirmingClearQueue,
+            titleVisibility: .visible
+        ) {
+            Button("Discard \(PendingQueueLabel.records(status.pendingRecordCount))", role: .destructive) {
+                Task { await appState.clearPendingQueue() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Queued records that have not been uploaded will be deleted from this iPhone. Apple Health keeps them; to send them later, sync that date range again from Sync historical data.")
+        }
+    }
+
     private var healthPermissionPresentation: HealthPermissionPromptPresentation {
         HealthPermissionPromptPresentation(
             permissionSummary: appState.permissionSummary,
@@ -308,6 +375,43 @@ struct DashboardView: View {
         case .warning: HealthSyncTheme.warningOrange
         case .error: HealthSyncTheme.primaryRed
         }
+    }
+}
+
+enum PendingQueueLabel {
+    static func records(_ count: Int) -> String {
+        "\(count.formatted()) \(count == 1 ? "record" : "records")"
+    }
+
+    static func batches(_ count: Int) -> String {
+        "\(count.formatted()) \(count == 1 ? "batch" : "batches")"
+    }
+}
+
+/// Shown while a sync or backfill runs; cancels it through `AppState.stopSync()`.
+struct StopSyncButton: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        Button {
+            Task { await appState.stopSync() }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "stop.circle.fill")
+                Text(appState.isStoppingSync ? "Stopping…" : "Stop sync")
+            }
+            .font(.headline.weight(.semibold))
+            .foregroundStyle(HealthSyncTheme.primaryRed)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(HealthSyncTheme.primaryRed.opacity(0.12))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(appState.isStoppingSync)
+        .accessibilityIdentifier("stop-sync-button")
     }
 }
 

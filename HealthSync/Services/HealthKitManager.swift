@@ -149,6 +149,7 @@ final class HealthKitManager: HealthKitSyncReading {
         }
         var result = HealthKitFetchResult.empty
         for type in types {
+            try Task.checkCancellation()
             guard HealthKitTypeRegistry.objectType(for: type) != nil else { continue }
             do {
                 switch type {
@@ -254,6 +255,7 @@ final class HealthKitManager: HealthKitSyncReading {
         var deletions: Set<HealthRecordDeletion> = []
 
         for type in types {
+            try Task.checkCancellation()
             guard let sampleType = HealthKitTypeRegistry.sampleType(for: type) else {
                 continue
             }

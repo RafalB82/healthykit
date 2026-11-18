@@ -199,7 +199,9 @@ struct AppSettings: Codable, Equatable {
 struct SyncStatus: Equatable {
     var lastSuccessfulSyncAt: Date?
     var lastAttemptedSyncAt: Date?
+    /// Number of queued upload batches (each holds up to 100 records).
     var pendingUploadCount: Int
+    var pendingRecordCount: Int = 0
     var lastError: String?
 
     static let empty = SyncStatus(

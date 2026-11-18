@@ -539,7 +539,7 @@ struct SettingsView: View {
                 Menu {
                     ForEach(SyncFrequency.allCases) { frequency in
                         Button {
-                            appState.settings.syncFrequency = frequency
+                            Task { await appState.setSyncFrequency(frequency) }
                         } label: {
                             HStack {
                                 Text(frequency.label)

@@ -165,6 +165,10 @@ struct BackfillView: View {
                         gradient: isInvalidRange || appState.isBusy ? HealthSyncTheme.disabledGradient : HealthSyncTheme.heartGradient
                     ))
                     .disabled(isInvalidRange || appState.isBusy)
+
+                    if appState.canStopSync {
+                        StopSyncButton()
+                    }
                     
                     if isInvalidRange {
                         Text("End date must be strictly after start date")

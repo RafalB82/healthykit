@@ -279,6 +279,62 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertEqual(loaded.hostedAgentEndpoint, "https://api.example.com/api/agent/health-data")
     }
 
+    func testClearingPendingQueueRemovesOnlyUnsentBatchesAndCountsRecords() async throws {
+        let url = temporaryDatabaseURL()
+        let store = try SQLiteLocalStore(url: url)
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        func payload(metricIDs: [String], deletionIDs: [String] = []) -> SyncPayload {
+            SyncPayload(deviceID: "existing-device", exportID: UUID(), generatedAt: start, timezone: "UTC",
+                source: "ios-healthkit", schemaVersion: 1, dateRange: SyncDateRange(start: start, end: start),
+                metrics: metricIDs.map {
+                    HealthMetric(id: $0, type: "step_count", value: 1, unit: "count", startAt: start, endAt: start,
+                        sourceName: "iPhone", sourceBundleID: nil, metadata: [:])
+                },
+                workouts: [],
+                deletions: deletionIDs.map { HealthRecordDeletion(id: $0, kind: .metric) })
+        }
+        let uploaded = SyncBatch(payload: payload(metricIDs: ["uploaded:1", "uploaded:2", "uploaded:3"]))
+        try await store.enqueueBatch(uploaded)
+        try await store.markBatchUploaded(id: uploaded.id, result: UploadResult(ok: true, received: 3, duplicates: 0))
+        try await store.enqueueBatch(legacyBatch())
+        try await store.enqueueBatch(SyncBatch(payload: payload(metricIDs: [], deletionIDs: ["gone:1", "gone:2"])))
+        try await store.saveAnchor("kept-anchor", for: .stepCount)
+
+        let before = try await store.syncStatus()
+        XCTAssertEqual(before.pendingUploadCount, 2)
+        XCTAssertEqual(before.pendingRecordCount, 207)
+
+        let cleared = try await store.clearPendingBatches()
+        XCTAssertEqual(cleared.batches, 2)
+        XCTAssertEqual(cleared.records, 207)
+
+        let reopened = try SQLiteLocalStore(url: url)
+        let pending = try await reopened.pendingBatches()
+        let after = try await reopened.syncStatus()
+        let anchor = try await reopened.loadAnchor(for: .stepCount)
+        XCTAssertTrue(pending.isEmpty)
+        XCTAssertEqual(after.pendingUploadCount, 0)
+        XCTAssertEqual(after.pendingRecordCount, 0)
+        XCTAssertEqual(anchor, "kept-anchor")
+        XCTAssertEqual(try storedBatchIDs(at: url), [uploaded.id.uuidString])
+    }
+
+    private func storedBatchIDs(at url: URL) throws -> [String] {
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK else { throw SQLiteStoreError.encodingFailed }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT id FROM batches", -1, &statement, nil) == SQLITE_OK else {
+            throw SQLiteStoreError.encodingFailed
+        }
+        defer { sqlite3_finalize(statement) }
+        var ids: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) {
+            ids.append(String(cString: text))
+        }
+        return ids
+    }
+
     private func temporaryDatabaseURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("HealthSyncTests-\(UUID().uuidString).sqlite")

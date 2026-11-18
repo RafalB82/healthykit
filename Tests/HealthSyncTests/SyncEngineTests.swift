@@ -113,6 +113,25 @@ final actor PausingUploader: SyncUploading {
     }
 }
 
+/// Holds every upload open until the calling task is cancelled, like a stalled request.
+final actor StallingUploader: SyncUploading {
+    private(set) var attempts = 0
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func upload(batch: SyncBatch, configuration: UploadConfiguration) async throws -> UploadResult {
+        attempts += 1
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        try await Task.sleep(nanoseconds: 60_000_000_000)
+        return UploadResult(ok: true, received: batch.payload.metrics.count, duplicates: 0)
+    }
+
+    func waitUntilUploadStarts() async {
+        if attempts > 0 { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+}
+
 final class SyncEngineTests: XCTestCase {
     func testNegativeAcknowledgementKeepsBatchQueued() async throws {
         let store = SyncEngineTestsStore()
@@ -139,6 +158,31 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertTrue(uploadedIDs.isEmpty)
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending.first?.attemptCount, 0)
+    }
+
+    func testStopDuringUploadEndsPromptlyAndLeavesEveryBatchQueued() async throws {
+        let store = SyncEngineTestsStore()
+        let uploader = StallingUploader()
+        let engine = SyncEngine(store: store, uploader: uploader)
+        for _ in 0..<3 {
+            _ = try await engine.queue(payload: .empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"))
+        }
+        let startedAt = Date()
+        let task = Task {
+            await engine.uploadPending(configuration: UploadConfiguration(baseURL: "https://example.com", token: "token", deviceID: "device", appVersion: "1.0"))
+        }
+        await uploader.waitUntilUploadStarts()
+        task.cancel()
+        let result = await task.value
+
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 10)
+        XCTAssertEqual(result.uploadedCount, 0)
+        XCTAssertEqual(result.messages, ["Sync cancelled. Queued uploads will retry."])
+        let attempts = await uploader.attempts
+        XCTAssertEqual(attempts, 1)
+        let pending = try await store.pendingBatches()
+        XCTAssertEqual(pending.count, 3)
+        XCTAssertTrue(pending.allSatisfy { $0.attemptCount == 0 && $0.lastError == nil })
     }
 
     func testBusyOperationRejectsSecondStart() {
@@ -482,6 +526,29 @@ final class IncrementalMaintenanceTests: XCTestCase {
                 startAt: now.addingTimeInterval(-60), endAt: now, sourceName: "Mi Fitness",
                 sourceBundleIdentifier: "com.example.fitness", metadata: [:])
         }, categorySamples: [], sleepSamples: [], workoutSamples: [])
+    }
+
+    func testStopCancelsIncrementalRunMidUploadWithoutMarkingBatchesFailed() async throws {
+        let store = try SQLiteLocalStore(url: databaseURL())
+        let reader = MaintenanceHealthReader(incremental: HealthKitIncrementalResult(
+            fetchResult: samples(205), anchors: [.stepCount: "after-read"], deletions: []))
+        let uploader = StallingUploader()
+        let runner = IncrementalSyncRunner(store: store, reader: reader, uploader: uploader)
+        let startedAt = Date()
+        let task = Task {
+            try await runner.run(types: [.stepCount], configuration: configuration, now: now, calendar: calendar)
+        }
+        await uploader.waitUntilUploadStarts()
+        task.cancel()
+        let result = await task.result
+
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 10)
+        XCTAssertThrowsError(try result.get()) { XCTAssertTrue($0 is CancellationError, "\($0)") }
+        let attempts = await uploader.attempts
+        XCTAssertEqual(attempts, 1)
+        let pending = try await store.pendingBatches()
+        XCTAssertEqual(pending.map(\.payload.metrics.count).sorted(), [5, 100, 100])
+        XCTAssertTrue(pending.allSatisfy { $0.attemptCount == 0 })
     }
 
     func testFreshDeletionSuppressesOldAdditionWhileRetainingUnrelatedQueuedData() async throws {

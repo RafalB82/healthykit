@@ -164,6 +164,9 @@ final class AppState: ObservableObject {
     @Published var backfillError: String?
     @Published var lastError: String?
     @Published var actionFeedback: HealthActionFeedback?
+    /// True while a sync or backfill runs, so the UI offers Stop sync.
+    @Published private(set) var canStopSync = false
+    @Published private(set) var isStoppingSync = false
 
     private var store: SQLiteLocalStore?
     private var syncEngine: SyncEngine?
@@ -173,6 +176,8 @@ final class AppState: ObservableObject {
     private let keychain = KeychainStore()
     private let backgroundSyncScheduler = BackgroundSyncScheduler()
     private var periodicSyncTask: Task<Void, Never>?
+    /// The one handle for the current busy operation; `stopSync()` cancels it.
+    private var busyOperation: Task<Void, Never>?
     private var bootstrapTask: Task<Void, Never>?
     private var pendingIncrementalSync = false
     private var pendingIncrementalWaiters: [CheckedContinuation<Bool, Never>] = []
@@ -228,7 +233,7 @@ final class AppState: ObservableObject {
     }
 
     func connectAppleHealth() async {
-        await runBusy {
+        await runBusy { [self] in
             try await prepareHostedStorageIfNeeded()
             try await healthKit.requestReadPermissions(for: settings.selectedTypes)
             settings.hasRequestedHealthPermissions = true
@@ -250,7 +255,7 @@ final class AppState: ObservableObject {
     }
 
     func saveSettingsAndToken() async {
-        await runBusy {
+        await runBusy { [self] in
             try await saveSettingsOnly()
             if !authTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 try keychain.saveToken(authTokenDraft)
@@ -263,14 +268,14 @@ final class AppState: ObservableObject {
     }
 
     func createHostedStorage() async {
-        await runBusy {
+        await runBusy { [self] in
             try await prepareHostedStorageIfNeeded()
             restartPeriodicSync()
         }
     }
 
     func resetHostedStorage() async {
-        await runBusy {
+        await runBusy { [self] in
             let client = APIClient(maxAttempts: 1)
             let label = "Personal Health"
             let ingestToken = (try keychain.readHostedIngestToken() ?? "")
@@ -303,7 +308,7 @@ final class AppState: ObservableObject {
     }
 
     func refreshHostedAgentToken() async {
-        await runBusy {
+        await runBusy { [self] in
             let ingestToken = (try keychain.readHostedIngestToken() ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !ingestToken.isEmpty else { throw APIClientError.missingToken }
@@ -364,7 +369,7 @@ final class AppState: ObservableObject {
     }
 
     func testConnection() async {
-        await runBusy {
+        await runBusy { [self] in
             guard let store else { throw APIClientError.invalidResponse }
             let configuration = try await uploadConfiguration()
             let now = Date()
@@ -384,7 +389,7 @@ final class AppState: ObservableObject {
     func syncLast24Hours() async {
         let end = Date()
         let start = end.addingTimeInterval(-24 * 60 * 60)
-        await runBusy {
+        await runBusy(stoppable: true) { [self] in
             try await prepareHostedStorageIfNeeded()
             let uploaded = try await syncDateRangeThrowing(start: start, end: end)
             actionFeedback = uploaded ? .syncCompleted : .noSamples
@@ -395,7 +400,7 @@ final class AppState: ObservableObject {
         guard end > start else { return }
         backfillProgress = 0
         backfillError = nil
-        await runBusy {
+        await runBusy(stoppable: true) { [self] in
             try await prepareHostedStorageIfNeeded()
             let chunks = BackfillSync.chunks(start: start, end: end)
             let total = Double(chunks.count)
@@ -416,7 +421,9 @@ final class AppState: ObservableObject {
                         uploadedAny = uploadedAny || uploaded
                     }
                 } catch {
-                    backfillError = userMessage(from: error)
+                    if !Task.isCancelled {
+                        backfillError = userMessage(from: error)
+                    }
                     throw error
                 }
                 backfillProgress = min(1, Double(index + 1) / total)
@@ -439,11 +446,53 @@ final class AppState: ObservableObject {
         }
 
         var succeeded = false
-        await runBusy {
+        await runBusy(stoppable: true) { [self] in
             try await syncIncrementalThrowing()
             succeeded = true
         }
         return succeeded
+    }
+
+    /// Cancels the current busy operation (sync, backfill, or any other `runBusy` work) and
+    /// returns once it has ended and `isBusy` is false. Batches already queued stay in the
+    /// pending queue, and syncs requested while it ran are dropped. Call it before starting
+    /// new busy work, not from inside a `runBusy` operation, which would wait on itself.
+    func stopSync() async {
+        guard let busyOperation else { return }
+        isStoppingSync = true
+        busyOperation.cancel()
+        await busyOperation.value
+    }
+
+    /// Discards queued batches that have not been uploaded, for example after
+    /// changing destination or narrowing the selected data types.
+    func clearPendingQueue() async {
+        await runBusy { [self] in
+            guard let store else { throw APIClientError.invalidResponse }
+            let cleared = try await store.clearPendingBatches()
+            let message = "Cleared pending queue: discarded \(PendingQueueLabel.records(cleared.records)) in \(PendingQueueLabel.batches(cleared.batches))."
+            try await store.appendLog(SyncLogEntry(level: .info, message: message))
+            actionFeedback = HealthActionFeedback(kind: .info, message: message)
+        }
+    }
+
+    /// Manual only pauses automatic sync at once; other cadences apply with "Apply frequency".
+    func setSyncFrequency(_ frequency: SyncFrequency) async {
+        settings.syncFrequency = frequency
+        guard frequency == .manualOnly else { return }
+        periodicSyncTask?.cancel()
+        periodicSyncTask = nil
+        backgroundSyncScheduler.cancel()
+        await healthKit.stopObserverQueries(disabling: Set(HealthDataType.allCases))
+        guard let store else { return }
+        do {
+            // Persist only the cadence so unsaved edits to other settings stay drafts.
+            var saved = try await store.loadSettings()
+            saved.syncFrequency = .manualOnly
+            try await store.saveSettings(saved)
+        } catch {
+            lastError = userMessage(from: error)
+        }
     }
 
     func performBackgroundSync() async {
@@ -510,6 +559,7 @@ final class AppState: ObservableObject {
         )
         guard BackfillSync.shouldUpload(payload) else { return false }
         for uploadPayload in BackfillSync.uploadPayloads(for: payload) {
+            try Task.checkCancellation()
             let batch = try await syncEngine.queue(payload: uploadPayload)
             let result = await syncEngine.uploadQueuedBatch(batch, configuration: configuration)
             try BackfillSync.validateUpload(result)
@@ -619,20 +669,48 @@ final class AppState: ObservableObject {
             && hasUsableUploadConfiguration()
     }
 
-    private func runBusy(_ operation: () async throws -> Void) async {
+    /// Runs `operation` as the busy operation in a stored task so `stopSync()` can cancel it.
+    /// Cancelling the calling task, such as the periodic sync loop, cancels it too.
+    /// `stoppable` marks a sync or backfill, which shows Stop sync and logs "Sync stopped.".
+    private func runBusy(stoppable: Bool = false, _ operation: @escaping @MainActor () async throws -> Void) async {
         guard BusyOperation.canStart(isBusy: isBusy) else { return }
         isBusy = true
+        canStopSync = stoppable
         lastError = nil
         actionFeedback = nil
+        let task = Task { @MainActor in
+            await self.performBusyOperation(stoppable: stoppable, operation)
+        }
+        busyOperation = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private func performBusyOperation(stoppable: Bool, _ operation: () async throws -> Void) async {
+        var cancelled = false
         defer {
+            // A stop requested after the work stopped checking for cancellation still counts.
+            let stopped = cancelled || isStoppingSync
             isBusy = false
+            busyOperation = nil
+            canStopSync = false
+            isStoppingSync = false
             if pendingIncrementalSync {
+                // Each waiter is taken off the list here and resumed exactly once below.
                 pendingIncrementalSync = false
                 let waiters = pendingIncrementalWaiters
                 pendingIncrementalWaiters.removeAll()
-                Task { @MainActor [weak self] in
-                    let succeeded = await self?.syncIncremental() ?? false
-                    waiters.forEach { $0.resume(returning: succeeded) }
+                if stopped {
+                    // A stop also drops syncs that observers requested while this one ran.
+                    waiters.forEach { $0.resume(returning: false) }
+                } else {
+                    Task { @MainActor [weak self] in
+                        let succeeded = await self?.syncIncremental() ?? false
+                        waiters.forEach { $0.resume(returning: succeeded) }
+                    }
                 }
             }
         }
@@ -640,6 +718,15 @@ final class AppState: ObservableObject {
             try await operation()
             await refresh()
         } catch {
+            if Task.isCancelled || error is CancellationError {
+                cancelled = true
+                if stoppable {
+                    actionFeedback = HealthActionFeedback(kind: .info, message: "Sync stopped. Unsent records stay in the pending queue. To pause automatic sync, set Background Sync to Manual only in Settings.")
+                    try? await store?.appendLog(SyncLogEntry(level: .info, message: "Sync stopped."))
+                }
+                await refresh()
+                return
+            }
             let message = userMessage(from: error)
             lastError = message
             actionFeedback = .failure(message)

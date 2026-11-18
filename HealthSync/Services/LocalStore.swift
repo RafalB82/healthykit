@@ -281,12 +281,22 @@ actor SQLiteLocalStore: BatchPersisting {
     }
 
     func syncStatus() async throws -> SyncStatus {
-        SyncStatus(
+        let pending = try pendingQueueCounts()
+        return SyncStatus(
             lastSuccessfulSyncAt: try dateSetting("last_successful_sync_at"),
             lastAttemptedSyncAt: try dateSetting("last_attempted_sync_at"),
-            pendingUploadCount: try pendingBatchCount(),
+            pendingUploadCount: pending.batches,
+            pendingRecordCount: pending.records,
             lastError: try latestError()
         )
+    }
+
+    /// Discards every batch that has not been uploaded. Uploaded history and anchors are kept.
+    @discardableResult
+    func clearPendingBatches() throws -> (batches: Int, records: Int) {
+        let cleared = try pendingQueueCounts()
+        try Self.execute("DELETE FROM batches WHERE uploaded_at IS NULL", db: db)
+        return cleared
     }
 
     func pruneUploaded(olderThan cutoff: Date) async throws {
@@ -375,11 +385,18 @@ actor SQLiteLocalStore: BatchPersisting {
         return Date(timeIntervalSince1970: interval)
     }
 
-    private func pendingBatchCount() throws -> Int {
-        let statement = try prepare("SELECT COUNT(*) FROM batches WHERE uploaded_at IS NULL")
+    private func pendingQueueCounts() throws -> (batches: Int, records: Int) {
+        let statement = try prepare("""
+        SELECT COUNT(*), COALESCE(SUM(
+            COALESCE(json_array_length(payload_json, '$.metrics'), 0)
+            + COALESCE(json_array_length(payload_json, '$.workouts'), 0)
+            + COALESCE(json_array_length(payload_json, '$.deletions'), 0)
+        ), 0)
+        FROM batches WHERE uploaded_at IS NULL
+        """)
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
-        return Int(sqlite3_column_int(statement, 0))
+        guard sqlite3_step(statement) == SQLITE_ROW else { return (0, 0) }
+        return (Int(sqlite3_column_int64(statement, 0)), Int(sqlite3_column_int64(statement, 1)))
     }
 
     private func latestError() throws -> String? {
