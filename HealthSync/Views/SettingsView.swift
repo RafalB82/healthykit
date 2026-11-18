@@ -499,6 +499,46 @@ struct SettingsView: View {
             color: HealthSyncTheme.primaryBlue
         ) {
             let categories = HealthMetricCategory.allCases
+            let selectedTypes = appState.settings.selectedTypes
+
+            HStack(spacing: 8) {
+                Button {
+                    appState.settings.selectedTypes = HealthDataPreset.everything.types
+                } label: {
+                    Label("All", systemImage: "checkmark.circle")
+                }
+                .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: false))
+                .disabled(selectedTypes == HealthDataPreset.everything.types)
+                .accessibilityLabel("Select all health data")
+                .accessibilityIdentifier("health-data-select-all-button")
+
+                Button {
+                    appState.settings.selectedTypes = []
+                } label: {
+                    Label("None", systemImage: "xmark.circle")
+                }
+                .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: false))
+                .disabled(selectedTypes.isEmpty)
+                .accessibilityLabel("Select no health data")
+                .accessibilityIdentifier("health-data-select-none-button")
+
+                Button {
+                    appState.settings.selectedTypes = HealthDataPreset.core.types
+                } label: {
+                    Label("Core", systemImage: "arrow.counterclockwise")
+                }
+                .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: true))
+                .disabled(selectedTypes == HealthDataPreset.core.types)
+                .accessibilityLabel("Reset to core health data")
+                .accessibilityIdentifier("health-data-reset-core-button")
+            }
+
+            Text("Core: \(HealthDataPreset.core.summary.lowercased()).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            SettingsDivider()
 
             VStack(spacing: 0) {
                 ForEach(categories.indices, id: \.self) { index in
@@ -717,7 +757,7 @@ struct SettingsView: View {
     }
 }
 
-private struct HealthMetricCategoryRow: View {
+struct HealthMetricCategoryRow: View {
     let category: HealthMetricCategory
     let selectedCount: Int
     let totalCount: Int
@@ -756,7 +796,7 @@ private struct HealthMetricCategoryRow: View {
     }
 }
 
-private struct HealthMetricCategoryView: View {
+struct HealthMetricCategoryView: View {
     @EnvironmentObject private var appState: AppState
 
     let category: HealthMetricCategory

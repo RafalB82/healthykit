@@ -66,6 +66,55 @@ enum StorageMode: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+/// Quick Health data selections offered in onboarding and Settings.
+/// Fresh installs start with `core`; saved selections are never replaced by a preset.
+enum HealthDataPreset: String, CaseIterable, Identifiable {
+    /// Everyday metrics: steps, walking/running distance, workouts, sleep, weight, heart rate, active energy.
+    case core
+    /// Core plus every Activity type, heart fitness metrics, and body composition.
+    case fitness
+    /// Every supported Health data type.
+    case everything
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .core: "Core"
+        case .fitness: "Fitness"
+        case .everything: "Everything"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .core: "Steps, distance, workouts, sleep, weight, heart rate, active energy"
+        case .fitness: "Core plus training, heart fitness, and body composition"
+        case .everything: "All supported Apple Health data"
+        }
+    }
+
+    var types: Set<HealthDataType> {
+        switch self {
+        case .core:
+            [.stepCount, .distanceWalkingRunning, .workouts, .sleepAnalysis, .bodyMass, .heartRate, .activeEnergy]
+        case .fitness:
+            Self.core.types
+                .union(HealthMetricCategory.activity.types)
+                .union([
+                    .restingHeartRate, .hrvSDNN, .vo2Max, .walkingHeartRateAverage,
+                    .heartRateRecoveryOneMinute, .bodyFatPercentage, .leanBodyMass
+                ])
+        case .everything:
+            Set(HealthDataType.allCases)
+        }
+    }
+
+    static func matching(_ selectedTypes: Set<HealthDataType>) -> HealthDataPreset? {
+        allCases.first { $0.types == selectedTypes }
+    }
+}
+
 struct AppSettings: Codable, Equatable {
     static let hostedBackendURL = "https://api.healthysync.app"
 
@@ -89,7 +138,7 @@ struct AppSettings: Codable, Equatable {
 
     static let `default` = AppSettings(
         backendURL: "",
-        selectedTypes: Set(HealthDataType.allCases),
+        selectedTypes: HealthDataPreset.core.types,
         syncFrequency: .hourlyBestEffort,
         hasRequestedHealthPermissions: false,
         storageMode: .hostedHealthSync,

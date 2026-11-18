@@ -29,6 +29,7 @@
 		110000000000000000000013 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000112 /* DashboardView.swift */; };
 		110000000000000000000014 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000113 /* SettingsView.swift */; };
 		110000000000000000000015 /* BackfillView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000114 /* BackfillView.swift */; };
+		2100000000000000000000A1 /* HealthDataSelectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2100000000000000000000A2 /* HealthDataSelectionView.swift */; };
 		110000000000000000000016 /* SyncLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000115 /* SyncLogView.swift */; };
 		110000000000000000000017 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 110000000000000000000116 /* libsqlite3.tbd */; };
 		110000000000000000000018 /* HealthKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 110000000000000000000117 /* HealthKit.framework */; };
@@ -67,6 +68,7 @@
 		110000000000000000000112 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		110000000000000000000113 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		110000000000000000000114 /* BackfillView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillView.swift; sourceTree = "<group>"; };
+		2100000000000000000000A2 /* HealthDataSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataSelectionView.swift; sourceTree = "<group>"; };
 		110000000000000000000115 /* SyncLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncLogView.swift; sourceTree = "<group>"; };
 		110000000000000000000116 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
 		110000000000000000000117 /* HealthKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = HealthKit.framework; path = System/Library/Frameworks/HealthKit.framework; sourceTree = SDKROOT; };
@@ -187,6 +189,7 @@
 				110000000000000000000112 /* DashboardView.swift */,
 				110000000000000000000113 /* SettingsView.swift */,
 				110000000000000000000114 /* BackfillView.swift */,
+				2100000000000000000000A2 /* HealthDataSelectionView.swift */,
 				110000000000000000000115 /* SyncLogView.swift */,
 			);
 			path = Views;
@@ -319,6 +322,7 @@
 				110000000000000000000013 /* DashboardView.swift in Sources */,
 				110000000000000000000014 /* SettingsView.swift in Sources */,
 				110000000000000000000015 /* BackfillView.swift in Sources */,
+				2100000000000000000000A1 /* HealthDataSelectionView.swift in Sources */,
 				110000000000000000000016 /* SyncLogView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

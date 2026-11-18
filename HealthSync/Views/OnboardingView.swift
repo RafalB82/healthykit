@@ -88,21 +88,14 @@ struct OnboardingView: View {
                             HealthActionFeedbackBanner(feedback: feedback)
                         }
                         
-                        Button {
-                            Task { await appState.connectAppleHealth() }
+                        NavigationLink {
+                            OnboardingHealthDataView()
                         } label: {
-                            HStack(spacing: 10) {
-                                if appState.isBusy {
-                                    ProgressView()
-                                        .tint(.white)
-                                    Text("Setting Up…")
-                                } else {
-                                    Text("Continue")
-                                }
-                            }
+                            Text("Continue")
                         }
                         .buttonStyle(HealthSyncTheme.PrimaryButtonStyle(isBusy: appState.isBusy, gradient: HealthSyncTheme.heartGradient))
                         .disabled(appState.isBusy)
+                        .accessibilityIdentifier("onboarding-continue-button")
                     }
                 }
                 .padding(24)

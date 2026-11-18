@@ -16,12 +16,18 @@ Support: https://healthysync.app/support
 
 ## What It Syncs
 
-- Steps, heart rate, resting heart rate, HRV SDNN
-- Active energy, basal energy
-- Body mass, body fat percentage
-- Sleep analysis
+HealthSync reads only the Apple Health data types you select. It supports 189 types across 11 categories (activity, heart, body, sleep, nutrition, and more).
+
+Fresh installs start with the **Core** set:
+
+- Steps and walking/running distance
 - Workouts
-- Optional dietary energy, macros, and water when available
+- Sleep analysis
+- Body mass (weight)
+- Heart rate
+- Active energy
+
+Onboarding lets you review the selection before iOS asks for Health access, using the Core, Fitness (Core plus all activity, heart fitness, and body composition types), or Everything presets, or by choosing types in each category. Settings → Health Data offers All, None, and Core shortcuts plus the same per-category lists. Updating the app never changes a selection you already saved.
 
 The app requests read-only HealthKit permissions. It does not request write permissions, does not include analytics, and does not use third-party telemetry or health SDKs.
 

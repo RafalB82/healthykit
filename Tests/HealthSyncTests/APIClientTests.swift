@@ -566,8 +566,62 @@ final class AppSettingsHostedEndpointTests: XCTestCase {
         XCTAssertEqual(AppSettings.default.syncFrequency, .hourlyBestEffort)
     }
 
-    func testDefaultSettingsSelectEverySupportedHealthDataType() {
-        XCTAssertEqual(AppSettings.default.selectedTypes, Set(HealthDataType.allCases))
+    func testFreshInstallSelectsOnlyTheDocumentedCoreHealthDataTypes() {
+        let expected: Set<HealthDataType> = [
+            .stepCount, .distanceWalkingRunning, .workouts, .sleepAnalysis,
+            .bodyMass, .heartRate, .activeEnergy
+        ]
+
+        XCTAssertEqual(AppSettings.default.selectedTypes, expected)
+        XCTAssertEqual(HealthDataPreset.matching(AppSettings.default.selectedTypes), .core)
+    }
+
+    func testHealthDataPresetsGrowFromCoreToEverything() {
+        let core = HealthDataPreset.core.types
+        let fitness = HealthDataPreset.fitness.types
+        let everything = HealthDataPreset.everything.types
+
+        XCTAssertTrue(core.isStrictSubset(of: fitness))
+        XCTAssertTrue(fitness.isStrictSubset(of: everything))
+        XCTAssertTrue(fitness.isSuperset(of: HealthMetricCategory.activity.types))
+        XCTAssertFalse(fitness.contains(.dietaryProtein))
+        XCTAssertEqual(everything, Set(HealthDataType.allCases))
+        XCTAssertNil(HealthDataPreset.matching([.stepCount]))
+        XCTAssertNil(HealthDataPreset.matching([]))
+    }
+
+    func testExistingUserWithEveryTypeSelectedKeepsEveryTypeAfterUpgrade() throws {
+        // Settings saved by builds whose default selected every type.
+        let allRawValues = HealthDataType.allCases.map { "\"\($0.rawValue)\"" }.joined(separator: ",")
+        let saved = """
+        {"backendURL":"","selectedTypes":[\(allRawValues)],"syncFrequency":"hourlyBestEffort",\
+        "hasRequestedHealthPermissions":true,"storageMode":"hostedHealthSync"}
+        """
+
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(saved.utf8))
+
+        XCTAssertEqual(decoded.selectedTypes, Set(HealthDataType.allCases))
+    }
+
+    func testExistingUserWithCustomSelectionIsNotResetToCore() throws {
+        let saved = """
+        {"backendURL":"","selectedTypes":["step_count","workouts","sleep_analysis","body_mass","distance_walking_running"],\
+        "syncFrequency":"manualOnly","hasRequestedHealthPermissions":true}
+        """
+
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(saved.utf8))
+
+        XCTAssertEqual(decoded.selectedTypes, [.stepCount, .workouts, .sleepAnalysis, .bodyMass, .distanceWalkingRunning])
+    }
+
+    func testExistingUserWithEmptySelectionStaysEmpty() throws {
+        let saved = """
+        {"backendURL":"","selectedTypes":[],"syncFrequency":"manualOnly","hasRequestedHealthPermissions":true}
+        """
+
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(saved.utf8))
+
+        XCTAssertTrue(decoded.selectedTypes.isEmpty)
     }
 
     func testHealthMetricCategoriesCoverEverySupportedTypeExactlyOnce() {
