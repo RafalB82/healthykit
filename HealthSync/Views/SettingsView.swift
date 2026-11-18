@@ -597,7 +597,7 @@ struct SettingsView: View {
                 Label("Save selection", systemImage: "square.and.arrow.down")
             }
             .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: true))
-            .disabled(appState.isBusy || selectedTypes.isEmpty)
+            .disabled(appState.isBusy || (selectedTypes.isEmpty && !appState.settings.hasRequestedHealthPermissions))
             .accessibilityIdentifier("health-data-save-selection-button")
 
             SettingsDivider()

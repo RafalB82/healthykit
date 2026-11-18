@@ -1,6 +1,8 @@
 import { Store, HttpError, capacity, now, record, type Auth, type Kind, type Row, type Table } from './store';
 type WorkerEnv = {
     DB: D1Database;
+    PROVISION_LIMITER: RateLimit;
+    TOKEN_LIMITER: RateLimit;
     TOKEN_HASH_SECRET?: string;
     HOSTED_PUBLIC_BASE_URL?: string;
     MIGRATION_STATE?: string;
@@ -14,7 +16,7 @@ function serialize(payload: unknown) {
     return { body, bytes };
 }
 function respond({ body }: { body: string }, status = 200) {
-    return new Response(body, { status, headers: { ...cors, 'Content-Type': 'application/json', ...(status === 503 ? { 'Retry-After': '5' } : {}) } });
+    return new Response(body, { status, headers: { ...cors, 'Content-Type': 'application/json', ...(status === 503 ? { 'Retry-After': '5' } : status === 429 ? { 'Retry-After': '60' } : {}) } });
 }
 const json = (payload: unknown, status = 200) => respond(serialize(payload), status);
 async function jsonBody(request: Request): Promise<Row> {
@@ -52,6 +54,12 @@ async function jsonBody(request: Request): Promise<Row> {
 }
 function randomToken(prefix: string) { return prefix + '_' + crypto.getRandomValues(new Uint8Array(32)).toBase64({ alphabet: 'base64url', omitPadding: true }); }
 async function tokenHash(token: string, secret: string) { const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(token))).toHex(); }
+async function admit(limiter: RateLimit | undefined, key: string) {
+    if (!limiter)
+        throw new HttpError(503, 'Service is not ready');
+    if (!(await limiter.limit({ key })).success)
+        throw new HttpError(429, 'Too many requests');
+}
 export default {
     async fetch(request: Request, env: WorkerEnv): Promise<Response> {
         if (request.method === 'OPTIONS')
@@ -68,7 +76,7 @@ export default {
                     database = true;
                 }
                 catch { }
-                const active = env.MIGRATION_STATE === 'active', ready = database && active && !!env.TOKEN_HASH_SECRET;
+                const active = env.MIGRATION_STATE === 'active', ready = database && active && !!env.TOKEN_HASH_SECRET && !!env.PROVISION_LIMITER && !!env.TOKEN_LIMITER;
                 return json({ ok: ready, ready, database, migration_state: active ? 'active' : 'locked' }, ready ? 200 : 503);
             }
             if (env.MIGRATION_STATE !== 'active')
@@ -80,7 +88,9 @@ export default {
                 const authorization = request.headers.get('Authorization') ?? '', token = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
                 if (!token)
                     throw new HttpError(401, 'Missing bearer token');
-                return store.authenticate(await tokenHash(token, secret), kind);
+                const hash = await tokenHash(token, secret);
+                await admit(env.TOKEN_LIMITER, hash);
+                return store.authenticate(hash, kind);
             };
             const create = async (payload: Row, oldAuth?: Auth) => {
                 const at = now(), workspace_id = randomToken('wk'), ingest_token = randomToken('hs_ingest'), agent_token = randomToken('hs_agent');
@@ -91,6 +101,7 @@ export default {
             let result: unknown;
             if (path === '/api/hosted/workspaces' && request.method === 'POST') {
                 route = 'provision';
+                await admit(env.PROVISION_LIMITER, request.headers.get('CF-Connecting-IP') || 'unknown');
                 result = await create(await jsonBody(request));
             }
             else if (path === '/api/hosted/workspaces/reset' && request.method === 'POST') {
@@ -113,8 +124,9 @@ export default {
                 route = path.split('/').at(-1)!;
                 const auth = await authenticate('agent_read');
                 if (route === 'health-data') {
+                    const summaries = await store.summaries(auth, url);
                     const metrics = await store.list('health_metrics', auth, url), workouts = await store.list('health_workouts', auth, url), syncs = await store.list('sync_batches', auth, url);
-                    result = { agent_schema_version: 2, workspace_id: auth.workspaceId, range: { from: url.searchParams.get('from'), to: url.searchParams.get('to') }, page: { ...metrics.page, has_more: metrics.page.has_more || workouts.page.has_more || syncs.page.has_more }, catalog: await store.catalog(auth), metrics: metrics.items, workouts: workouts.items, syncs: syncs.items, ...await store.summaries(auth, url) };
+                    result = { agent_schema_version: 2, workspace_id: auth.workspaceId, range: { from: url.searchParams.get('from'), to: url.searchParams.get('to') }, page: { ...metrics.page, has_more: metrics.page.has_more || workouts.page.has_more || syncs.page.has_more }, catalog: await store.catalog(auth), metrics: metrics.items, workouts: workouts.items, syncs: syncs.items, ...summaries };
                 }
                 else {
                     const table: Table = route === 'metrics' ? 'health_metrics' : route === 'workouts' ? 'health_workouts' : 'sync_batches';

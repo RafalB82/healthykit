@@ -32,83 +32,102 @@ permissions:
 
 jobs:
   validate:
-    name: Validate release credentials
+    name: Validate release ref and build number
     runs-on: ubuntu-latest
-
-    env:
-      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-      APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
-      APP_STORE_CONNECT_API_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY }}
-
+    permissions: {}
+    outputs:
+      build_number: ${{ steps.release.outputs.build_number }}
     steps:
-      - name: Validate App Store Connect secrets
+      - name: Check main and resolve the build number
+        id: release
+        env:
+          BUILD_NUMBER: ${{ inputs.build_number }}
         run: |
           set -euo pipefail
 
-          [[ -n "$APP_STORE_CONNECT_API_KEY_ID" ]] || { echo "::error::Missing APP_STORE_CONNECT_API_KEY_ID secret."; exit 1; }
-          [[ -n "$APP_STORE_CONNECT_API_ISSUER_ID" ]] || { echo "::error::Missing APP_STORE_CONNECT_API_ISSUER_ID secret."; exit 1; }
-          [[ -n "$APP_STORE_CONNECT_API_PRIVATE_KEY" ]] || { echo "::error::Missing APP_STORE_CONNECT_API_PRIVATE_KEY secret."; exit 1; }
+          if [[ "$GITHUB_REF" != refs/heads/main || "${GITHUB_REF_PROTECTED:-}" != true ]]; then
+            echo "::error::TestFlight releases must run from protected main."
+            exit 1
+          fi
+
+          BUILD_NUMBER="${BUILD_NUMBER:-$GITHUB_RUN_NUMBER}"
+          if [[ ! "$BUILD_NUMBER" =~ ^[0-9]*[1-9][0-9]*$ ]]; then
+            echo "::error::The build number must be a positive decimal integer."
+            exit 1
+          fi
+
+          printf 'build_number=%s\n' "$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
 
   status:
     name: Check App Store processing
-    if: ${{ inputs.status_only && !inputs.prepare_store_version && !inputs.submit_store_version }}
+    if: >-
+      ${{ github.ref == 'refs/heads/main' && github.ref_protected &&
+          inputs.status_only && !inputs.prepare_store_version && !inputs.submit_store_version }}
     needs: validate
     runs-on: ubuntu-latest
-    env:
-      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-      APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
-      APP_STORE_CONNECT_API_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY }}
+    environment: testflight-release
     steps:
       - uses: actions/checkout@v4
       - name: Read release status
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_ISSUER_ID }}
+          APP_STORE_CONNECT_API_PRIVATE_KEY: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_PRIVATE_KEY }}
         run: node scripts/app-store-status.mjs
 
   prepare-store:
     name: Prepare migration App Store draft
-    if: ${{ inputs.prepare_store_version && !inputs.status_only && !inputs.submit_store_version }}
+    if: >-
+      ${{ github.ref == 'refs/heads/main' && github.ref_protected &&
+          inputs.prepare_store_version && !inputs.status_only && !inputs.submit_store_version }}
     needs: validate
     runs-on: ubuntu-latest
-    env:
-      APP_VERSION: ${{ inputs.version }}
-      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-      APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
-      APP_STORE_CONNECT_API_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY }}
+    environment: testflight-release
     steps:
       - uses: actions/checkout@v4
+      - name: Test App Store release scripts
+        run: node --test scripts/test-app-store-release.mjs
       - name: Prepare verified build and release notes
-        run: |
-          node --test scripts/test-app-store-release.mjs
-          node scripts/prepare-app-store-migration.mjs
+        env:
+          APP_VERSION: ${{ inputs.version }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_ISSUER_ID }}
+          APP_STORE_CONNECT_API_PRIVATE_KEY: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_PRIVATE_KEY }}
+        run: node scripts/prepare-app-store-migration.mjs
 
   submit-store:
     name: Submit migration for App Review
-    if: ${{ inputs.submit_store_version && !inputs.status_only && !inputs.prepare_store_version }}
+    if: >-
+      ${{ github.ref == 'refs/heads/main' && github.ref_protected &&
+          inputs.submit_store_version && !inputs.status_only && !inputs.prepare_store_version }}
     needs: validate
     runs-on: ubuntu-latest
-    env:
-      APP_VERSION: ${{ inputs.version }}
-      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-      APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
-      APP_STORE_CONNECT_API_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY }}
+    environment: testflight-release
     steps:
       - uses: actions/checkout@v4
+      - name: Test App Store release scripts
+        run: node --test scripts/test-app-store-release.mjs
       - name: Submit only the prepared migration
-        run: |
-          node --test scripts/test-app-store-release.mjs
-          node scripts/submit-app-store-migration.mjs
+        env:
+          APP_VERSION: ${{ inputs.version }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_ISSUER_ID }}
+          APP_STORE_CONNECT_API_PRIVATE_KEY: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_PRIVATE_KEY }}
+        run: node scripts/submit-app-store-migration.mjs
 
   upload:
     name: Test and prepare TestFlight build
-    if: ${{ !inputs.status_only && !inputs.prepare_store_version && !inputs.submit_store_version }}
+    if: >-
+      ${{ github.ref == 'refs/heads/main' && github.ref_protected &&
+          !inputs.status_only && !inputs.prepare_store_version && !inputs.submit_store_version }}
     needs: validate
     runs-on: macos-26
+    environment: testflight-release
     timeout-minutes: 60
 
     env:
       APP_VERSION: ${{ inputs.version }}
-      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-      APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
-      APP_STORE_CONNECT_API_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY }}
+      BUILD_NUMBER: ${{ needs.validate.outputs.build_number }}
       TEAM_ID: 9UR77TD484
       EXPORT_DESTINATION: ${{ inputs.export_only && 'export' || 'upload' }}
 
@@ -158,33 +177,41 @@ jobs:
             -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO
 
-      - name: Write App Store Connect API key
+      - name: Create export options
         run: |
           set -euo pipefail
 
+          /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :destination string $EXPORT_DESTINATION" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :teamID string $TEAM_ID" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :signingStyle string automatic" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :uploadSymbols bool true" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :manageAppVersionAndBuildNumber bool false" "$RUNNER_TEMP/ExportOptions.plist"
+
+      - name: Write App Store Connect API key
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_PRIVATE_KEY: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          : "${APP_STORE_CONNECT_API_KEY_ID:?Set TESTFLIGHT_APP_STORE_CONNECT_API_KEY_ID in testflight-release}"
+          : "${APP_STORE_CONNECT_API_PRIVATE_KEY:?Set TESTFLIGHT_APP_STORE_CONNECT_API_PRIVATE_KEY in testflight-release}"
+          umask 077
           mkdir -p "$ASC_KEY_DIR"
           ASC_KEY_PATH="$ASC_KEY_DIR/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
           printf '%s' "$APP_STORE_CONNECT_API_PRIVATE_KEY" > "$ASC_KEY_PATH"
           perl -0pi -e 's/\\n/\n/g' "$ASC_KEY_PATH"
-          chmod 600 "$ASC_KEY_PATH"
           echo "ASC_KEY_PATH=$ASC_KEY_PATH" >> "$GITHUB_ENV"
 
-      - name: Resolve build number
-        run: |
-          set -euo pipefail
-
-          BUILD_NUMBER="${{ inputs.build_number }}"
-          if [[ -z "$BUILD_NUMBER" ]]; then
-            BUILD_NUMBER="$GITHUB_RUN_NUMBER"
-          fi
-
-          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
-          echo "Preparing HealthSync $APP_VERSION ($BUILD_NUMBER), destination: $EXPORT_DESTINATION"
-
       - name: Archive HealthSync
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_ISSUER_ID }}
         run: |
           set -euo pipefail
 
+          : "${APP_STORE_CONNECT_API_ISSUER_ID:?Set TESTFLIGHT_APP_STORE_CONNECT_API_ISSUER_ID in testflight-release}"
           xcodebuild archive \
             -project HealthSync.xcodeproj \
             -scheme HealthSync \
@@ -201,18 +228,10 @@ jobs:
             MARKETING_VERSION="$APP_VERSION" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
 
-      - name: Create export options
-        run: |
-          set -euo pipefail
-
-          /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" "$RUNNER_TEMP/ExportOptions.plist"
-          /usr/libexec/PlistBuddy -c "Add :destination string $EXPORT_DESTINATION" "$RUNNER_TEMP/ExportOptions.plist"
-          /usr/libexec/PlistBuddy -c "Add :teamID string $TEAM_ID" "$RUNNER_TEMP/ExportOptions.plist"
-          /usr/libexec/PlistBuddy -c "Add :signingStyle string automatic" "$RUNNER_TEMP/ExportOptions.plist"
-          /usr/libexec/PlistBuddy -c "Add :uploadSymbols bool true" "$RUNNER_TEMP/ExportOptions.plist"
-          /usr/libexec/PlistBuddy -c "Add :manageAppVersionAndBuildNumber bool false" "$RUNNER_TEMP/ExportOptions.plist"
-
       - name: Export signed build
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.TESTFLIGHT_APP_STORE_CONNECT_API_ISSUER_ID }}
         run: |
           set -euo pipefail
 
@@ -224,6 +243,10 @@ jobs:
             -authenticationKeyPath "$ASC_KEY_PATH" \
             -authenticationKeyID "$APP_STORE_CONNECT_API_KEY_ID" \
             -authenticationKeyIssuerID "$APP_STORE_CONNECT_API_ISSUER_ID"
+
+      - name: Remove App Store Connect API key
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/private_keys"
 
       - name: Collect distribution logs
         if: always()

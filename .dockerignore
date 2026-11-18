@@ -1,10 +1,10 @@
-.DS_Store
-.DerivedData/
-.git/
-.pytest_cache/
-.venv/
-DerivedData/
-__pycache__/
-*.pyc
-*.xcuserstate
-xcuserdata/
+# Send only the build inputs, not .env, database dumps, backups, or the whole checkout.
+**
+!alembic.ini
+!backend/Dockerfile
+!backend/requirements.txt
+!backend/*.py
+!backend/alembic/env.py
+!backend/alembic/script.py.mako
+!backend/alembic/versions/*.py
+!backend/scripts/*.py

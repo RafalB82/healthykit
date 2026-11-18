@@ -658,7 +658,7 @@ final class AppSettingsHostedEndpointTests: XCTestCase {
         XCTAssertEqual(HealthMetricCategory.category(for: .menstrualFlow), .reproductiveHealth)
     }
 
-    func testDecodingLegacyDefaultSelectedTypesEnablesAllDietaryTypes() throws {
+    func testDecodingLegacyDefaultSelectedTypesPreservesTheExactSelection() throws {
         let legacyDefaultSelectedTypes: Set<HealthDataType> = [
             .stepCount,
             .heartRate,
@@ -684,8 +684,7 @@ final class AppSettingsHostedEndpointTests: XCTestCase {
         let data = try JSONEncoder().encode(settings)
         let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
 
-        XCTAssertFalse(legacyDefaultSelectedTypes.isSuperset(of: HealthDataType.dietaryTypes))
-        XCTAssertTrue(decoded.selectedTypes.isSuperset(of: HealthDataType.dietaryTypes))
+        XCTAssertEqual(decoded.selectedTypes, legacyDefaultSelectedTypes)
     }
 
     func testDecodingCustomSelectedTypesPreservesUserChoice() throws {

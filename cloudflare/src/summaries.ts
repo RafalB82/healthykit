@@ -33,6 +33,15 @@ type Stats = {
 const empty = (): Stats => ({ count: 0, sum: 0, min: Infinity, max: -Infinity });
 function add(stats: Stats, value: number) { stats.count++; stats.sum += value; stats.min = Math.min(stats.min, value); stats.max = Math.max(stats.max, value); }
 function merge(a: Stats, b: Stats) { a.count += b.count; a.sum += b.sum; a.min = Math.min(a.min, b.min); a.max = Math.max(a.max, b.max); }
+function isDailyAggregate(row: Row) {
+    if (!row.preferred || row.type.includes(':')) return false;
+    const prefix = `healthkit:aggregate:${row.type}:`;
+    if (!row.id.startsWith(prefix)) return false;
+    const day = row.id.slice(prefix.length);
+    if (!/^(?!0000)\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+    const date = new Date(day);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === day;
+}
 export class Summaries {
     private metrics = new Map<string, {
         key: string[];
@@ -74,7 +83,7 @@ export class Summaries {
             this.check(byteLength(key) + byteLength(group.first));
         }
         this.retainFirst(group, row);
-        add(row.preferred ? group.preferred : group.raw, Number(row.value));
+        add(isDailyAggregate(row) ? group.preferred : group.raw, Number(row.value));
     }
     workout(row: Row) {
         const key = [this.dates.get(row.start_at, row.timezone), row.activity_type], id = JSON.stringify(key);

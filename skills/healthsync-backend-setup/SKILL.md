@@ -29,7 +29,7 @@ Use this skill to take a HealthSync repo from a request-shape stub or partial ba
 5. Verify setup end to end:
    - Run backend tests.
    - Run migration smoke checks.
-   - Validate Docker Compose config.
+   - Validate Docker Compose with `docker compose config --quiet` so resolved credentials stay out of output.
    - Give the user exact app settings: backend URL and which token field to use.
 
 For the concrete schema, env vars, commands, and verification checklist, read `references/healthsync-backend.md`.

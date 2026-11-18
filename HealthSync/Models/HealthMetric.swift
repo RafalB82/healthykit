@@ -62,6 +62,15 @@ struct SyncPayload: Codable, Equatable {
         metrics.isEmpty && workouts.isEmpty && deletions.isEmpty
     }
 
+    func retainingSelectedTypes(_ types: Set<HealthDataType>) -> SyncPayload {
+        let allowed = Set(types.map(\.rawValue))
+        let retainedMetrics = metrics.filter { allowed.contains($0.type) }
+        let retainedWorkouts = types.contains(.workouts) ? workouts : []
+        guard retainedMetrics.count != metrics.count || retainedWorkouts.count != workouts.count else { return self }
+        // Deletions remove data previously sent to this destination; they carry no sample values.
+        return copy(metrics: retainedMetrics, workouts: retainedWorkouts, deletions: deletions)
+    }
+
     func excludingRecords(metricIDs: Set<String>, workoutIDs: Set<String>) -> SyncPayload {
         let retainedMetrics = metrics.filter { !metricIDs.contains($0.id) }
         let retainedWorkouts = workouts.filter { !workoutIDs.contains($0.id) }

@@ -667,6 +667,8 @@ final class HealthKitManager: HealthKitSyncReading {
 
     private func metadata(from sample: HKSample) -> [String: String] {
         sample.metadata?.reduce(into: [:]) { result, item in
+            // Only HealthSync's statistics path writes aggregate provenance.
+            guard item.key != "aggregation", !item.key.hasPrefix("aggregation_") else { return }
             result[item.key] = String(describing: item.value)
         } ?? [:]
     }

@@ -5,11 +5,11 @@ from datetime import datetime, timezone
 import secrets
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .config import Settings
-from .models import AccessTokenRecord
+from .models import AccessTokenRecord, WorkspaceRecord
 from .tokens import token_hash
 
 
@@ -53,10 +53,37 @@ def resolve_access_token(
     expected_kind: str,
 ) -> AuthContext:
     candidate_hash = token_hash(token, settings.token_hash_secret)
-    record = db.scalar(select(AccessTokenRecord).where(AccessTokenRecord.token_hash == candidate_hash))
-    if record is None or record.revoked_at is not None or record.kind != expected_kind:
+    query = select(AccessTokenRecord).where(
+        AccessTokenRecord.token_hash == candidate_hash,
+        AccessTokenRecord.kind == expected_kind,
+        AccessTokenRecord.revoked_at.is_(None),
+    )
+    if expected_kind == "ingest":
+        workspace_id = db.scalar(query.with_only_columns(AccessTokenRecord.workspace_id))
+        if workspace_id is None or not _lock_workspace(db, workspace_id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid bearer token")
+        query = query.where(AccessTokenRecord.workspace_id == workspace_id).with_for_update()
+
+    record = db.scalar(query)
+    if record is None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid bearer token")
 
     record.last_used_at = datetime.now(timezone.utc)
-    db.commit()
+    if expected_kind == "ingest":
+        # Keep the workspace lock until the mutation commits; reset also deletes this token.
+        db.flush()
+    else:
+        db.commit()
     return AuthContext(workspace_id=record.workspace_id, token_kind=record.kind)
+
+
+def _lock_workspace(db: Session, workspace_id: str) -> bool:
+    if db.get_bind().dialect.name == "sqlite":
+        # Start with a write, not a read snapshot: SQLite has no row-level locks.
+        db.rollback()
+        return db.execute(
+            update(WorkspaceRecord).where(WorkspaceRecord.id == workspace_id).values(label=WorkspaceRecord.label)
+        ).rowcount == 1
+    return db.scalar(
+        select(WorkspaceRecord.id).where(WorkspaceRecord.id == workspace_id).with_for_update()
+    ) is not None

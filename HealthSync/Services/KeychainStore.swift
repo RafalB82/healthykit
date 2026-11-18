@@ -2,11 +2,10 @@ import Foundation
 import Security
 
 protocol TokenProviding {
-    func readToken() throws -> String?
-    func saveToken(_ token: String) throws
-    func deleteToken() throws
+    func readUploadToken(id: UUID) throws -> String?
+    func saveUploadToken(_ token: String, id: UUID) throws
+    func deleteUploadToken(id: UUID) throws
     func readHostedIngestToken() throws -> String?
-    func saveHostedIngestToken(_ token: String) throws
     func readHostedAgentToken() throws -> String?
     func saveHostedAgentToken(_ token: String) throws
 }
@@ -27,28 +26,23 @@ enum KeychainError: LocalizedError {
 
 struct KeychainStore: TokenProviding {
     private let service = "com.megabyte0x.HealthSync"
-    private let backendAuthTokenAccount = "backendAuthToken"
     private let hostedIngestTokenAccount = "hostedIngestToken"
     private let hostedAgentTokenAccount = "hostedAgentToken"
 
-    func readToken() throws -> String? {
-        try readToken(account: backendAuthTokenAccount)
+    func readUploadToken(id: UUID) throws -> String? {
+        try readToken(account: "uploadToken.\(id.uuidString)")
     }
 
-    func saveToken(_ token: String) throws {
-        try saveToken(token, account: backendAuthTokenAccount)
+    func saveUploadToken(_ token: String, id: UUID) throws {
+        try saveToken(token, account: "uploadToken.\(id.uuidString)")
     }
 
-    func deleteToken() throws {
-        try deleteToken(account: backendAuthTokenAccount)
+    func deleteUploadToken(id: UUID) throws {
+        try deleteToken(account: "uploadToken.\(id.uuidString)")
     }
 
     func readHostedIngestToken() throws -> String? {
         try readToken(account: hostedIngestTokenAccount)
-    }
-
-    func saveHostedIngestToken(_ token: String) throws {
-        try saveToken(token, account: hostedIngestTokenAccount)
     }
 
     func readHostedAgentToken() throws -> String? {

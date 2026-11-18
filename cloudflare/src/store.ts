@@ -12,7 +12,7 @@ export type Auth = {
 export class HttpError extends Error {
     constructor(public status: number, message: string) { super(message); }
 }
-export const capacity = { requestBytes: 8 * 1024 * 1024, requestItems: 10000, responseBytes: 8 * 1024 * 1024, pageRows: 5000, tieKeys: 150000, tieBytes: 16 * 1024 * 1024, groups: 50000, groupBytes: 8 * 1024 * 1024, devices: 10000, statements: 1000 };
+export const capacity = { requestBytes: 8 * 1024 * 1024, requestItems: 10000, responseBytes: 8 * 1024 * 1024, pageRows: 5000, tieKeys: 150000, tieBytes: 16 * 1024 * 1024, summaryRows: 300000, groups: 50000, groupBytes: 8 * 1024 * 1024, devices: 10000, statements: 1000 };
 export function timestamp(value: unknown): string {
     if (typeof value !== 'string')
         throw new HttpError(400, 'Invalid timestamp');
@@ -57,6 +57,7 @@ export const byteLength = (value: unknown) => encoder.encode(JSON.stringify(valu
 const chunks = <T>(rows: T[], size: number): T[][] => Array.from({ length: Math.ceil(rows.length / size) }, (_, i) => rows.slice(i * size, (i + 1) * size));
 const placeholders = (n: number) => Array(n).fill('?').join(',');
 const identity = (row: Row) => JSON.stringify('id' in row ? [row.device_id, row.id] : [row.export_id]);
+const rawHealthKitId = /^healthkit:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const summaryCache = new SummaryCache();
 export class Store {
     readonly collation = new SourceCollation();
@@ -105,6 +106,10 @@ export class Store {
         }
         catch (error) {
             await this.recheck(auth);
+            if (error instanceof Error && error.message.includes('workspace_ingest_growth_limit'))
+                throw new HttpError(507, 'Workspace storage capacity exceeded');
+            if (error instanceof Error && error.message.includes('export generation is immutable'))
+                throw new HttpError(409, 'Export ID already has a different generated_at');
             throw error;
         }
     }
@@ -118,9 +123,17 @@ export class Store {
         return rows;
     }
     async health() { await this.batch([this.statement('SELECT 1 FROM workspaces LIMIT 1')]); }
-    private upsert(table: string, row: Row, keys: string[], ignore = false) {
+    private upsert(table: string, row: Row, keys: string[], order?: { kind: string; generatedAt: string; recreate: boolean }) {
         const columns = Object.keys(row), updates = columns.filter(c => !keys.includes(c));
-        return this.statement(`INSERT INTO ${table} (${columns.join(',')}) VALUES (${placeholders(columns.length)}) ON CONFLICT (${keys.join(',')}) DO ${ignore ? 'NOTHING' : `UPDATE SET ${updates.map(c => `${c}=excluded.${c}`).join(',')}`}`, Object.values(row));
+        const tombstone = 'SELECT 1 FROM ingest_deletions WHERE workspace_id=? AND device_id=? AND kind=? AND id=?';
+        const key = order ? [row.workspace_id, row.device_id, order.kind, row.id] : [];
+        const input = order
+            ? `SELECT ${placeholders(columns.length)} WHERE NOT EXISTS (${tombstone} AND (permanent=1 OR generated_at>? OR (generated_at=? AND recreate_export_id IS NOT ?)))`
+            : `VALUES (${placeholders(columns.length)})`;
+        const update = order ? ` WHERE NOT EXISTS (${tombstone}) OR (SELECT s.generated_at FROM sync_batches s WHERE s.workspace_id=${table}.workspace_id AND s.export_id=${table}.export_id)<=?` : '';
+        return this.statement(`INSERT INTO ${table} (${columns.join(',')}) ${input} ON CONFLICT (${keys.join(',')}) DO UPDATE SET ${updates.map(c => `${c}=excluded.${c}`).join(',')}${update}`, [
+            ...Object.values(row), ...(order ? [...key, order.generatedAt, order.generatedAt, order.recreate ? row.export_id : '', ...key, order.generatedAt] : [])
+        ]);
     }
     async provision(workspace: Row, tokens: Row[], oldAuth?: Auth) {
         const statements = [];
@@ -153,17 +166,34 @@ export class Store {
         const statements = [this.statement('INSERT INTO devices(device_id,first_seen_at,last_seen_at,app_version) VALUES(?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET last_seen_at=excluded.last_seen_at,app_version=excluded.app_version', [device_id, at, at, appVersion]), this.statement('INSERT INTO workspace_devices(workspace_id,device_id,created_at,last_seen_at) VALUES(?,?,?,?) ON CONFLICT(workspace_id,device_id) DO UPDATE SET created_at=excluded.created_at,last_seen_at=excluded.last_seen_at', [workspace_id, device_id, at, at])];
         const deletedIndexes: number[] = [], duplicateIndexes: number[] = [];
         if (metrics.length || workouts.length || deletions.length) {
-            const schema_version = Number(payload.schema_version ?? 1);
+            const schema_version = Number(payload.schema_version ?? 1), generated_at = timestamp(required(payload.generated_at, 'generated_at'));
             if (!Number.isInteger(schema_version) || schema_version < -2147483648 || schema_version > 2147483647)
                 throw new HttpError(500, 'Internal server error');
-            for (const [kind, table] of [['metric', 'health_metrics'], ['workout', 'health_workouts']]) {
+            const tables = [['metric', 'health_metrics', metrics], ['workout', 'health_workouts', workouts]] as const;
+            const deleted = new Set(deletions.map(d => JSON.stringify([d.kind, d.id])));
+            const tombstones: D1PreparedStatement[] = [];
+            for (const [kind, table] of tables) {
                 const ids = [...new Set<string>(deletions.filter(d => d.kind === kind).map(d => d.id))];
-                for (const part of chunks(ids, 98)) {
-                    deletedIndexes.push(statements.length);
-                    statements.push(this.statement(`DELETE FROM ${table} WHERE workspace_id=? AND device_id=? AND id IN (${placeholders(part.length)}) RETURNING id`, [workspace_id, device_id, ...part]));
+                // UUIDs are never reused by HealthKit. Only reusable IDs consult the client clock.
+                for (const permanent of [true, false]) {
+                    for (const part of chunks(ids.filter(id => rawHealthKitId.test(id) === permanent), 94)) {
+                        const order = permanent ? '' : ` AND (SELECT s.generated_at FROM sync_batches s WHERE s.workspace_id=${table}.workspace_id AND s.export_id=${table}.export_id)<=?`;
+                        deletedIndexes.push(statements.length);
+                        statements.push(this.statement(`DELETE FROM ${table} WHERE workspace_id=? AND device_id=? AND id IN (${placeholders(part.length)})${order} RETURNING id`, [workspace_id, device_id, ...part, ...(permanent ? [] : [generated_at])]));
+                        // At a tie, a different delete export takes precedence over a same-export replacement.
+                        tombstones.push(this.statement(`WITH ids(id) AS (VALUES ${part.map(() => '(?)').join(',')})
+                            INSERT INTO ingest_deletions (workspace_id,device_id,kind,id,permanent,generated_at,recreate_export_id)
+                            SELECT ?,?,?,id,?,?,? FROM ids WHERE 1
+                            ON CONFLICT(workspace_id,device_id,kind,id) DO UPDATE SET
+                                recreate_export_id=CASE WHEN ingest_deletions.generated_at<excluded.generated_at THEN excluded.recreate_export_id ELSE NULL END,
+                                generated_at=excluded.generated_at
+                            WHERE ingest_deletions.permanent=0 AND (ingest_deletions.generated_at<excluded.generated_at OR
+                                (ingest_deletions.generated_at=excluded.generated_at AND ingest_deletions.recreate_export_id<>excluded.recreate_export_id))`, [...part, workspace_id, device_id, kind, Number(permanent), generated_at, permanent ? null : export_id]));
+                    }
                 }
             }
-            for (const [table, rows] of [['health_metrics', metrics], ['health_workouts', workouts]] as const) {
+            statements.push(...tombstones);
+            for (const [, table, rows] of tables) {
                 // The source counts distinct IDs separately in each original 100-item chunk.
                 for (const original of chunks(rows.map(r => String(r.id)).filter(Boolean), 100))
                     for (const part of chunks([...new Set(original)], 98)) {
@@ -171,15 +201,16 @@ export class Store {
                         statements.push(this.statement(`SELECT count(*) AS n FROM ${table} WHERE workspace_id=? AND device_id=? AND id IN (${placeholders(part.length)})`, [workspace_id, device_id, ...part]));
                     }
             }
-            statements.push(this.upsert('sync_batches', { workspace_id, export_id, device_id, generated_at: timestamp(required(payload.generated_at, 'generated_at')), received_at: at, schema_version, timezone: required(payload.timezone, 'timezone'), source: required(payload.source, 'source'), date_range_start: timestamp(required(payload.date_range?.start, 'date_range.start')), date_range_end: timestamp(required(payload.date_range?.end, 'date_range.end')), metrics_count: metrics.length, workouts_count: workouts.length }, ['workspace_id', 'export_id']));
-            for (const [table, rows, kind] of [['health_metrics', metrics, 'metrics'], ['health_workouts', workouts, 'workouts']] as const) {
+            statements.push(this.upsert('sync_batches', { workspace_id, export_id, device_id, generated_at, received_at: at, schema_version, timezone: required(payload.timezone, 'timezone'), source: required(payload.source, 'source'), date_range_start: timestamp(required(payload.date_range?.start, 'date_range.start')), date_range_end: timestamp(required(payload.date_range?.end, 'date_range.end')), metrics_count: metrics.length, workouts_count: workouts.length }, ['workspace_id', 'export_id']));
+            for (const [kind, table, rows] of tables) {
                 for (const original of chunks(rows, 100)) {
                     if (new Set(original.map(r => r.id)).size !== original.length)
                         throw new HttpError(500, 'Internal server error');
                     for (const row of original) {
-                        const base = { workspace_id, device_id, id: required(row.id, `${kind}.id`), start_at: timestamp(required(row.start_at, `${kind}.start_at`)), end_at: timestamp(required(row.end_at, `${kind}.end_at`)), source_name: required(row.source_name, `${kind}.source_name`), source_bundle_id: typeof row.source_bundle_id === 'string' ? row.source_bundle_id : null, metadata: postgresMetadata(row.metadata), export_id };
+                        const field = kind + 's';
+                        const base = { workspace_id, device_id, id: required(row.id, `${field}.id`), start_at: timestamp(required(row.start_at, `${field}.start_at`)), end_at: timestamp(required(row.end_at, `${field}.end_at`)), source_name: required(row.source_name, `${field}.source_name`), source_bundle_id: typeof row.source_bundle_id === 'string' ? row.source_bundle_id : null, metadata: postgresMetadata(row.metadata), export_id };
                         const details = table === 'health_metrics' ? { type: required(row.type, 'metrics.type'), value: Number(row.value), unit: required(row.unit, 'metrics.unit') } : { activity_type: required(row.activity_type, 'workouts.activity_type'), duration_seconds: Number(row.duration_seconds), total_energy_kcal: nullableNumber(row.total_energy_kcal), active_energy_kcal: nullableNumber(row.active_energy_kcal), distance_meters: nullableNumber(row.distance_meters) };
-                        statements.push(this.upsert(table, { ...base, ...details }, ['workspace_id', 'device_id', 'id']));
+                        statements.push(this.upsert(table, { ...base, ...details }, ['workspace_id', 'device_id', 'id'], { kind, generatedAt: generated_at, recreate: deleted.has(JSON.stringify([kind, base.id])) }));
                     }
                 }
             }
@@ -187,8 +218,9 @@ export class Store {
         const results = await this.mutate(auth, statements);
         return { ok: true, received: metrics.length + workouts.length, duplicates: duplicateIndexes.reduce((n, i) => n + Number(results[i].results[0].n), 0), deleted: deletedIndexes.reduce((n, i) => n + results[i].results.length, 0), workspace_id, export_id };
     }
-    private filter(table: Table, auth: Auth, url: URL) {
+    private filter(table: Table, auth: Auth, url: URL, summaryCandidates = false) {
         const clauses = ['r.workspace_id=?'], values: unknown[] = [auth.workspaceId];
+        let end: string | undefined;
         const field = table === 'health_metrics' ? 'type' : table === 'health_workouts' ? 'activity_type' : 'device_id';
         if (url.searchParams.has(field)) {
             clauses.push(`r.${field}=?`);
@@ -197,11 +229,14 @@ export class Store {
         for (const [parameter, column, op] of [['from', table === 'sync_batches' ? 'date_range_end' : 'start_at', '>='], ['to', table === 'sync_batches' ? 'date_range_start' : 'end_at', '<=']]) {
             const value = url.searchParams.get(parameter);
             if (value) {
-                clauses.push(`r.${column}${op}?`);
-                values.push(timestamp(/^\d{4}-\d{2}-\d{2}$/.test(value) ? value + 'T00:00:00Z' : value));
+                const bound = timestamp(/^\d{4}-\d{2}-\d{2}$/.test(value) ? value + 'T00:00:00Z' : value);
+                const candidateEnd = summaryCandidates && parameter === 'to';
+                if (candidateEnd) end = bound;
+                clauses.push(`r.${candidateEnd ? 'start_at' : column}${op}?`);
+                values.push(bound);
             }
         }
-        return { sql: clauses.join(' AND '), values };
+        return { sql: clauses.join(' AND '), values, end };
     }
     private order(table: Table) { return table === 'sync_batches' ? { stamp: 'received_at', keys: ['export_id'] } : { stamp: 'start_at', keys: ['device_id', 'id'] }; }
     private async selectKeys(table: Table, auth: Auth, url: URL, limit: number, offset: number) {
@@ -320,20 +355,28 @@ export class Store {
     private async scanSummaries(auth: Auth, url: URL) {
         const summary = new Summaries(this.dates, capacity.groups, capacity.groupBytes, this.collation);
         for (const table of ['health_metrics', 'health_workouts'] as const) {
-            const f = this.filter(table, auth, url);
+            const f = this.filter(table, auth, url, true);
             let cursor: Row | undefined;
-            const projection = table === 'health_metrics' ? "r.type,r.unit,r.value,CASE WHEN json_type(r.metadata)='object' AND json_extract(r.metadata,'$.aggregation') IN ('daily_sum','daily_average') THEN 1 ELSE 0 END preferred" : 'r.activity_type,r.duration_seconds,r.distance_meters,r.total_energy_kcal,r.active_energy_kcal';
+            const projection = table === 'health_metrics' ? "r.type,r.unit,r.value,CASE WHEN substr(r.id,1,20)='healthkit:aggregate:' THEN json_extract(r.metadata,'$.aggregation') IN ('daily_sum','daily_average') AND json_extract(r.metadata,'$.aggregation_period')='day' ELSE 0 END preferred" : 'r.activity_type,r.duration_seconds,r.distance_meters,r.total_energy_kcal,r.active_energy_kcal';
+            const page = (predicate: string, values: unknown[], limit: number) => this.read(auth, `SELECT r.start_at,r.device_id,r.id,r.end_at,s.timezone,${projection} FROM ${table} r CROSS JOIN sync_batches s ON s.workspace_id=r.workspace_id AND s.export_id=r.export_id WHERE ${f.sql}${predicate} ORDER BY r.start_at DESC,r.device_id COLLATE BINARY,r.id COLLATE BINARY LIMIT ?`, [...f.values, ...values, limit]);
             do {
-                const predicate = cursor ? ' AND r.start_at<=? AND (r.start_at<? OR (r.device_id,r.id)>(?,?))' : '';
-                const values = cursor ? [cursor.start_at, cursor.start_at, cursor.device_id, cursor.id] : [];
-                const rows = await this.read(auth, `SELECT r.start_at,r.device_id,r.id,s.timezone,${projection} FROM ${table} r${this.join(table)} WHERE ${f.sql}${predicate} ORDER BY r.start_at DESC,r.device_id COLLATE BINARY,r.id COLLATE BINARY LIMIT ?`, [...f.values, ...values, capacity.pageRows]);
+                const limit = Math.min(capacity.pageRows, capacity.summaryRows - this.stats.summaryRows + 1);
+                // Seek in the boundary tie and the older range separately; never rescan a tie's prefix.
+                const rows = cursor ? await page(' AND r.start_at=? AND (r.device_id,r.id)>(?,?)', [cursor.start_at, cursor.device_id, cursor.id], limit) : [];
+                if (rows.length < limit)
+                    rows.push(...await page(cursor ? ' AND r.start_at<?' : '', cursor ? [cursor.start_at] : [], limit - rows.length));
                 this.stats.summaryRows += rows.length;
-                for (const row of rows)
+                if (this.stats.summaryRows > capacity.summaryRows)
+                    throw new HttpError(503, 'Summary scan capacity exceeded; narrow the requested range');
+                for (const row of rows) {
+                    // Count candidates rejected by end_at: pushing this predicate into SQL could hide an unbounded scan.
+                    if (f.end && row.end_at > f.end) continue;
                     if (table === 'health_metrics')
                         summary.metric(row);
                     else
                         summary.workout(row);
-                if (rows.length < capacity.pageRows)
+                }
+                if (rows.length < limit)
                     break;
                 cursor = rows[rows.length - 1];
             } while (true);

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
+import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import Select, desc, select
@@ -64,29 +65,26 @@ def reset_hosted_workspace(db: Session, settings: Settings, workspace_id: str, l
 
 def rotate_hosted_agent_token(db: Session, settings: Settings, workspace_id: str) -> HostedAgentTokenResponse:
     created_at = datetime.now(timezone.utc)
-    token_id = generate_token("tok")
     agent_token = generate_token("hs_agent")
 
     try:
-        db.add(
-            AccessTokenRecord(
-                id=token_id,
-                workspace_id=workspace_id,
-                kind="agent_read",
-                token_hash=token_hash(agent_token, settings.token_hash_secret),
-                created_at=created_at,
-            )
-        )
-        db.flush()
         (
             db.query(AccessTokenRecord)
             .filter(
                 AccessTokenRecord.workspace_id == workspace_id,
                 AccessTokenRecord.kind == "agent_read",
-                AccessTokenRecord.id != token_id,
                 AccessTokenRecord.revoked_at.is_(None),
             )
             .update({AccessTokenRecord.revoked_at: created_at}, synchronize_session=False)
+        )
+        db.add(
+            AccessTokenRecord(
+                id=generate_token("tok"),
+                workspace_id=workspace_id,
+                kind="agent_read",
+                token_hash=token_hash(agent_token, settings.token_hash_secret),
+                created_at=created_at,
+            )
         )
         db.commit()
     except Exception:
@@ -154,6 +152,8 @@ def persist_sync_payload(
     payload: SyncPayloadIn,
     app_version: str | None,
     workspace_id: str,
+    *,
+    self_hosted: bool,
 ) -> UploadResult:
     received_at = datetime.now(timezone.utc)
     export_id = str(payload.export_id)
@@ -161,7 +161,8 @@ def persist_sync_payload(
     deleted = 0
 
     try:
-        ensure_workspace(db, workspace_id, received_at)
+        if self_hosted and db.get(WorkspaceRecord, workspace_id) is None:
+            db.add(WorkspaceRecord(id=workspace_id, created_at=received_at, label=None))
 
         device = db.get(DeviceRecord, payload.device_id)
         if device is None:
@@ -447,11 +448,6 @@ def list_sync_batches(
     )
 
 
-def ensure_workspace(db: Session, workspace_id: str, created_at: datetime) -> None:
-    if db.get(WorkspaceRecord, workspace_id) is None:
-        db.add(WorkspaceRecord(id=workspace_id, created_at=created_at, label=None))
-
-
 def get_agent_catalog(db: Session, workspace_id: str) -> AgentCatalog:
     metric_types = db.scalars(
         select(HealthMetricRecord.type)
@@ -491,10 +487,13 @@ def summarize_metric_items(items: list[HealthMetricOut]) -> list[MetricDailySumm
 
     grouped_values: dict[tuple[str, str, str], list[float]] = defaultdict(list)
     for (local_date, metric_type, unit, _), grouped_items in grouped_by_device.items():
+        # The ID's device-calendar day need not match the day used for summary grouping.
         daily_aggregates = [
             item
             for item in grouped_items
-            if item.metadata.get("aggregation") in {"daily_sum", "daily_average"}
+            if item.metadata.get("aggregation") in ("daily_sum", "daily_average")
+            and item.id[:-10] == f"healthkit:aggregate:{metric_type}:"
+            and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", item.id[-10:])
         ]
         grouped_values[(local_date, metric_type, unit)].extend(
             item.value for item in (daily_aggregates or grouped_items)

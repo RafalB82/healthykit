@@ -59,6 +59,49 @@ actor SQLiteLocalStore: BatchPersisting {
         try upsertSetting(key: "app_settings", value: value)
     }
 
+    /// The new credentials become active in the same commit that retires the old queue.
+    func saveDestination(_ settings: AppSettings, replacingAuthorization: Bool) throws -> Int {
+        try settingsTransaction {
+            let discarded = replacingAuthorization ? try clearPendingBatches().batches : 0
+            try saveSettings(settings)
+            return discarded
+        }
+    }
+
+    func saveHealthSelection(_ types: Set<HealthDataType>) throws {
+        try settingsTransaction {
+            for batch in try readPendingBatches() {
+                let retained = batch.payload.retainingSelectedTypes(types)
+                guard retained != batch.payload else { continue }
+                if retained.isEmpty {
+                    try deleteBatch(id: batch.id)
+                } else {
+                    let statement = try prepare("UPDATE batches SET payload_json = ? WHERE id = ?")
+                    defer { sqlite3_finalize(statement) }
+                    try bindText(try payloadJSON(retained), to: statement, at: 1)
+                    try bindText(batch.id.uuidString, to: statement, at: 2)
+                    try stepDone(statement)
+                }
+            }
+            try updateSettings {
+                $0.hasRequestedHealthPermissions = true
+                $0.selectedTypes = types
+            }
+        }
+    }
+
+    private func settingsTransaction<T>(_ change: () throws -> T) throws -> T {
+        try Self.execute("BEGIN IMMEDIATE", db: db)
+        do {
+            let result = try change()
+            try Self.execute("COMMIT", db: db)
+            return result
+        } catch {
+            try? Self.execute("ROLLBACK", db: db)
+            throw error
+        }
+    }
+
     func deviceID() async throws -> String {
         if let existing = try selectSetting("device_id"), !existing.isEmpty {
             return existing
@@ -84,17 +127,6 @@ actor SQLiteLocalStore: BatchPersisting {
         let batches = payload.chunked(maxRecords: maxRecords).map { SyncBatch(payload: $0, destination: destination) }
         try replaceSupersededRecords(with: payload, destination: destination, batches: batches)
         return batches
-    }
-
-    /// Deletes queued batches that were not queued for `destination`, so a destination switch never sends
-    /// them elsewhere. Returns how many were deleted.
-    @discardableResult
-    func discardPendingBatches(notFor destination: String) throws -> Int {
-        let statement = try prepare("DELETE FROM batches WHERE uploaded_at IS NULL AND destination <> ?")
-        defer { sqlite3_finalize(statement) }
-        try bindText(destination, to: statement, at: 1)
-        try stepDone(statement)
-        return Int(sqlite3_changes(db))
     }
 
     private func replaceSupersededRecords(with payload: SyncPayload, destination: String, batches: [SyncBatch]) throws {
@@ -123,11 +155,11 @@ actor SQLiteLocalStore: BatchPersisting {
         }
     }
 
+    private func payloadJSON(_ payload: SyncPayload) throws -> String {
+        String(decoding: try PayloadJSON.encoder.encode(payload), as: UTF8.self)
+    }
+
     private func insertBatch(_ batch: SyncBatch) throws {
-        let payloadData = try PayloadJSON.encoder.encode(batch.payload)
-        guard let payloadJSON = String(data: payloadData, encoding: .utf8) else {
-            throw SQLiteStoreError.encodingFailed
-        }
         let sql = """
         INSERT INTO batches (id, payload_json, created_at, uploaded_at, attempt_count, last_error, destination)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -135,7 +167,7 @@ actor SQLiteLocalStore: BatchPersisting {
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
         try bindText(batch.id.uuidString, to: statement, at: 1)
-        try bindText(payloadJSON, to: statement, at: 2)
+        try bindText(try payloadJSON(batch.payload), to: statement, at: 2)
         sqlite3_bind_double(statement, 3, batch.createdAt.timeIntervalSince1970)
         if let uploadedAt = batch.uploadedAt {
             sqlite3_bind_double(statement, 4, uploadedAt.timeIntervalSince1970)
@@ -349,7 +381,7 @@ actor SQLiteLocalStore: BatchPersisting {
             destination TEXT NOT NULL DEFAULT ''
         )
         """, db: db)
-        try migrateBatchDestinations(db: db)
+        try migrateQueueAuthorization(db: db)
         try execute("""
         CREATE TABLE IF NOT EXISTS logs (
             id TEXT PRIMARY KEY,
@@ -360,38 +392,31 @@ actor SQLiteLocalStore: BatchPersisting {
         """, db: db)
     }
 
-    /// Databases from before destinations were recorded get the column added. Their queued batches were all
-    /// queued for the destination saved in settings, so they keep it; without one they never upload.
-    private static func migrateBatchDestinations(db: OpaquePointer?) throws {
+    /// Pre-upgrade queues cannot prove which credential was approved for their payloads.
+    private static func migrateQueueAuthorization(db: OpaquePointer?) throws {
         var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT user_version FROM pragma_user_version", -1, &statement, nil) == SQLITE_OK,
+              sqlite3_step(statement) == SQLITE_ROW else {
+            sqlite3_finalize(statement)
+            throw SQLiteStoreError.statementFailed(message(from: db))
+        }
+        let version = sqlite3_column_int(statement, 0)
+        sqlite3_finalize(statement)
+        guard version < 1 else { return }
+
         guard sqlite3_prepare_v2(db, "SELECT 1 FROM pragma_table_info('batches') WHERE name = 'destination'", -1, &statement, nil) == SQLITE_OK else {
             throw SQLiteStoreError.statementFailed(message(from: db))
         }
         let hasColumn = sqlite3_step(statement) == SQLITE_ROW
         sqlite3_finalize(statement)
-        guard !hasColumn else { return }
-
-        var destination = ""
-        if sqlite3_prepare_v2(db, "SELECT value FROM settings WHERE key = 'app_settings'", -1, &statement, nil) == SQLITE_OK,
-           sqlite3_step(statement) == SQLITE_ROW,
-           let text = sqlite3_column_text(statement, 0),
-           var settings = try? JSONDecoder().decode(AppSettings.self, from: Data(String(cString: text).utf8)) {
-            settings.migrateHostedEndpoints()
-            destination = settings.uploadDestination ?? ""
-        }
-        sqlite3_finalize(statement)
 
         try execute("BEGIN IMMEDIATE", db: db)
         do {
-            try execute("ALTER TABLE batches ADD COLUMN destination TEXT NOT NULL DEFAULT ''", db: db)
-            guard sqlite3_prepare_v2(db, "UPDATE batches SET destination = ?", -1, &statement, nil) == SQLITE_OK else {
-                throw SQLiteStoreError.statementFailed(message(from: db))
+            if !hasColumn {
+                try execute("ALTER TABLE batches ADD COLUMN destination TEXT NOT NULL DEFAULT ''", db: db)
             }
-            defer { sqlite3_finalize(statement) }
-            sqlite3_bind_text(statement, 1, destination, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-            guard sqlite3_step(statement) == SQLITE_DONE else {
-                throw SQLiteStoreError.statementFailed(message(from: db))
-            }
+            try execute("DELETE FROM batches WHERE uploaded_at IS NULL", db: db)
+            try execute("PRAGMA user_version = 1", db: db)
             try execute("COMMIT", db: db)
         } catch {
             try? execute("ROLLBACK", db: db)

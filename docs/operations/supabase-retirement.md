@@ -38,6 +38,14 @@ Publish the shared HTML/Markdown agent-access guide and include its URL in relea
 
 After rollout, inspect aggregate legacy-function requests and old app versions. Keep identifiers, tokens and health values out of rollout reports. Confirm known agent owners have moved. Choose a retirement date only with this evidence; users who never update cannot be made compatible with deleting a third-party-owned hostname. A zero-breakage guarantee for every dormant client is incompatible with deleting that hostname before those clients update.
 
+## Decouple the old Supabase API credential
+
+The cutover records historical reuse of a Supabase secret API key as Cloudflare's token HMAC key. They do not establish whether that API key is still valid. The retained PostgreSQL tables grant `service_role` reads despite RLS; treat the old API access as unresolved until it is contained or retired.
+
+1. In Supabase, inspect API-key IDs, revocation history, Data API settings and internal consumers. Record only credential IDs and status, never key bytes. The legacy bridge forwards to Cloudflare and must remain reachable during adoption; verify its configuration separately from the Data API.
+2. With owner approval, disable the project's Data API if no remaining consumer needs it and revoke the original Supabase secret API key by ID once its dependencies are cleared. If its ID cannot be established, do not guess; keep the exposure marked unresolved and have the owner use the credential inventory or approve a broader retirement after checking dependent consumers.
+3. Confirm the approved change using control-plane settings and redacted health/bridge checks. Preserve the exact Cloudflare `TOKEN_HASH_SECRET` and its protected recovery copy. Rotating that HMAC key is a separate migration that would invalidate all existing hosted bearers.
+
 ## Remove the remaining Supabase resources
 
 1. Verify the actual next billing date in the organization billing page; it has not been verified by this runbook. Complete app release and agent updates ahead of that date rather than assuming the next month is free.

@@ -126,6 +126,8 @@ struct AppSettings: Codable, Equatable {
     var storageMode: StorageMode?
     var hostedWorkspaceID: String?
     var hostedAgentEndpoint: String?
+    var customTokenID: UUID?
+    var hostedIngestTokenID: UUID?
 
     private enum CodingKeys: String, CodingKey {
         case backendURL
@@ -135,6 +137,8 @@ struct AppSettings: Codable, Equatable {
         case storageMode
         case hostedWorkspaceID
         case hostedAgentEndpoint
+        case customTokenID
+        case hostedIngestTokenID
     }
 
     static let `default` = AppSettings(
@@ -146,19 +150,6 @@ struct AppSettings: Codable, Equatable {
         hostedWorkspaceID: nil,
         hostedAgentEndpoint: nil
     )
-
-    private static let legacyDefaultSelectedTypes: Set<HealthDataType> = [
-        .stepCount,
-        .heartRate,
-        .restingHeartRate,
-        .hrvSDNN,
-        .activeEnergy,
-        .basalEnergy,
-        .bodyMass,
-        .bodyFatPercentage,
-        .sleepAnalysis,
-        .workouts
-    ]
 
     var effectiveBackendURL: String {
         switch storageMode {
@@ -239,8 +230,7 @@ struct AppSettings: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         backendURL = try container.decode(String.self, forKey: .backendURL)
-        let decodedSelectedTypes = try container.decode(Set<HealthDataType>.self, forKey: .selectedTypes)
-        selectedTypes = Self.selectedTypesWithDefaultDietaryTypes(decodedSelectedTypes)
+        selectedTypes = try container.decode(Set<HealthDataType>.self, forKey: .selectedTypes)
         syncFrequency = try container.decode(SyncFrequency.self, forKey: .syncFrequency)
         hasRequestedHealthPermissions = try container.decode(Bool.self, forKey: .hasRequestedHealthPermissions)
         // Settings saved before hosted storage existed have no storageMode key and always used a custom backend.
@@ -250,6 +240,8 @@ struct AppSettings: Codable, Equatable {
             : .customBackend
         hostedWorkspaceID = try container.decodeIfPresent(String.self, forKey: .hostedWorkspaceID)
         hostedAgentEndpoint = try container.decodeIfPresent(String.self, forKey: .hostedAgentEndpoint)
+        customTokenID = try container.decodeIfPresent(UUID.self, forKey: .customTokenID)
+        hostedIngestTokenID = try container.decodeIfPresent(UUID.self, forKey: .hostedIngestTokenID)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -261,11 +253,8 @@ struct AppSettings: Codable, Equatable {
         try container.encode(storageMode, forKey: .storageMode)
         try container.encodeIfPresent(hostedWorkspaceID, forKey: .hostedWorkspaceID)
         try container.encodeIfPresent(hostedAgentEndpoint, forKey: .hostedAgentEndpoint)
-    }
-
-    private static func selectedTypesWithDefaultDietaryTypes(_ selectedTypes: Set<HealthDataType>) -> Set<HealthDataType> {
-        guard selectedTypes == legacyDefaultSelectedTypes else { return selectedTypes }
-        return selectedTypes.union(HealthDataType.dietaryTypes)
+        try container.encodeIfPresent(customTokenID, forKey: .customTokenID)
+        try container.encodeIfPresent(hostedIngestTokenID, forKey: .hostedIngestTokenID)
     }
 }
 

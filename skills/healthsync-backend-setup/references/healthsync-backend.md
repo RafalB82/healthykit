@@ -245,7 +245,7 @@ Run what exists in the repo. Typical checks:
 ```bash
 python3 -m compileall backend Tests/backend
 python3 -m pytest Tests/backend/test_backend_api.py -q
-docker compose --env-file .env.example config
+docker compose --env-file .env.example config --quiet
 env DATABASE_URL=sqlite+pysqlite:////private/tmp/healthsync-alembic-test.sqlite alembic upgrade head
 ```
 
@@ -271,6 +271,6 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 - `401`: missing `Authorization: Bearer <token>` header.
 - `403`: token does not match `API_TOKEN`.
 - App sync succeeds but no rows appear: confirm the app is pointed at the persistent backend, not `backend_stub`.
-- Docker cannot start API: validate `.env`, then run `docker compose --env-file .env config`.
+- Docker cannot start API: run `docker compose --env-file .env config --quiet` to validate without printing resolved credentials.
 - Real iPhone cannot connect: use HTTPS in production, or verify same-Wi-Fi LAN IP and iOS Local Network permission for local testing.
 - Duplicate records: expected on retries; rows should be updated, not multiplied.

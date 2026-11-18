@@ -339,6 +339,12 @@ def test_hosted_agent_token_can_be_rotated_with_ingest_token(tmp_path: Path) -> 
     assert new_read.json()["workspace_id"] == provisioned["workspace_id"]
     assert len(new_read.json()["metrics"]) == 1
 
+    next_rotation = client.post("/api/hosted/agent-token", headers=ingest_headers)
+    assert next_rotation.status_code == 200
+    for token, expected_status in ((rotated["agent_token"], 403), (next_rotation.json()["agent_token"], 200)):
+        read = client.get("/api/agent/health-data", headers={"Authorization": f"Bearer {token}"})
+        assert read.status_code == expected_status
+
 
 def test_hosted_agent_token_rotation_rejects_agent_token(tmp_path: Path) -> None:
     client = make_client(tmp_path, hosted=True)
@@ -383,6 +389,8 @@ def test_hosted_workspace_reset_deletes_current_workspace_and_returns_new_host(t
 
     assert client.get("/api/agent/health-data", headers=old_agent_headers).status_code == 403
     assert client.post("/api/apple-health/sync", headers=ingest_headers, json=sample_payload()).status_code == 403
+    assert client.post("/api/hosted/agent-token", headers=ingest_headers).status_code == 403
+    assert client.post("/api/hosted/workspaces/reset", headers=ingest_headers, json={}).status_code == 403
 
     new_read = client.get(
         "/api/agent/health-data",
@@ -393,6 +401,12 @@ def test_hosted_workspace_reset_deletes_current_workspace_and_returns_new_host(t
     assert new_read.json()["metrics"] == []
     assert new_read.json()["workouts"] == []
     assert new_read.json()["syncs"] == []
+    new_upload = client.post(
+        "/api/apple-health/sync",
+        headers={"Authorization": f"Bearer {reset['ingest_token']}"},
+        json=sample_payload(),
+    )
+    assert new_upload.status_code == 200
 
     other_read = client.get(
         "/api/agent/health-data",
@@ -629,14 +643,15 @@ def test_agent_daily_summary_prefers_daily_aggregate_over_overlapping_raw_sample
     payload["metrics"] = [
         {
             **raw_template,
-            "id": "healthkit:meal-1",
+            "id": "healthkit:11111111-1111-4111-8111-111111111111",
             "value": 20,
             "start_at": "2026-05-31T08:00:00.000Z",
             "end_at": "2026-05-31T08:05:00.000Z",
+            "metadata": {"aggregation": "daily_sum", "aggregation_period": "day"},
         },
         {
             **raw_template,
-            "id": "healthkit:meal-2",
+            "id": "healthkit:22222222-2222-4222-8222-222222222222",
             "value": 30,
             "start_at": "2026-05-31T12:00:00.000Z",
             "end_at": "2026-05-31T12:05:00.000Z",
@@ -698,10 +713,15 @@ def test_agent_daily_summary_preserves_raw_samples_from_devices_without_an_aggre
     second_device["metrics"] = [
         {
             **second_device["metrics"][0],
-            "id": "healthkit:device-2-meal",
+            "id": "healthkit:33333333-3333-4333-8333-333333333333",
             "value": 10,
+            "metadata": {"aggregation": "daily_average"},
+        },
+        {
+            **second_device["metrics"][0],
+            "value": 15,
             "metadata": {},
-        }
+        },
     ]
 
     assert client.post("/api/apple-health/sync", headers=ingest_headers, json=first_device).status_code == 200
@@ -717,9 +737,9 @@ def test_agent_daily_summary_preserves_raw_samples_from_devices_without_an_aggre
             "local_date": "2026-05-31",
             "type": "dietary_protein",
             "unit": "g",
-            "sample_count": 2,
-            "total_value": 60.0,
-            "average_value": 30.0,
+            "sample_count": 3,
+            "total_value": 75.0,
+            "average_value": 25.0,
             "minimum_value": 10.0,
             "maximum_value": 50.0,
         }

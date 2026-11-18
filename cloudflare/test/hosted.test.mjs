@@ -7,9 +7,12 @@ import { createRequire } from 'node:module';
 const require = createRequire(new URL('../../web/package.json', import.meta.url));
 const { Miniflare, convertV4MiniflareOptions } = require('miniflare');
 const { build } = require('esbuild');
+const { unstable_splitSqlQuery } = require('wrangler');
 let mf, db, directory;
 const stamp = '2026-03-08T06:30:00.000001Z';
+const newer = '2026-03-08T06:30:00.000002Z';
 const metric = (id, extra = {}) => ({ id, type: 'steps', value: 1, unit: 'count', start_at: stamp, end_at: stamp, source_name: 'Synthetic', metadata: { note: 'é 😀' }, ...extra });
+const daily = (aggregation = 'daily_sum') => ({ aggregation, aggregation_period: 'day' });
 const payload = (metrics = [], extra = {}) => ({ device_id: 'test-device', export_id: 'test-export', generated_at: stamp, timezone: 'America/New_York', source: 'test', date_range: { start: '2026-03-08T00:00:00Z', end: '2026-03-09T00:00:00Z' }, metrics, ...extra });
 async function call(path, token, body, extraHeaders = {}) {
     const response = await mf.dispatchFetch('https://example.test' + path, { method: body === undefined ? 'GET' : 'POST', headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...extraHeaders }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -23,7 +26,11 @@ import { capacity } from './src/store.ts';
 import { SourceCollation } from './src/collation.ts';
 export default {async fetch(request, env, ctx) {
  const scenario=request.headers.get('X-Test-Scenario'), workspace=request.headers.get('X-Test-Workspace');
- const saved={...capacity};let fired=false,billedRows=0,maxBindings=0,summaryRows=0;
+ const saved={...capacity};let fired=false,billedRows=0,maxBindings=0,summaryRows=0,admissionKey;
+ env={...env,
+  PROVISION_LIMITER:{async limit({key}){if(scenario==='provision-denied')admissionKey=key;return {success:scenario!=='provision-denied'}}},
+  TOKEN_LIMITER:{async limit({key}){if(scenario==='token-denied')admissionKey=key;return {success:scenario!=='token-denied'}}}
+ };
  const original=env.DB, sql=new WeakMap();
  const countResults=(statements,results)=>{for(let i=0;i<results.length;i++){billedRows+=results[i].meta.rows_read||0;const query=sql.get(statements[i])||'';if(query.includes('s.timezone,r.type,r.unit,r.value')||query.includes('s.timezone,r.activity_type,r.duration_seconds'))summaryRows+=results[i].results.length}};
  if(scenario==='nul-app-version')request=new Proxy(request,{get(target,key){if(key==='headers')return {get(name){return name.toLowerCase()==='x-app-version'?'invalid\\u0000version'.replace('\\u0000',String.fromCharCode(0)):target.headers.get(name)}};return Reflect.get(target,key,target)}});
@@ -35,6 +42,7 @@ export default {async fetch(request, env, ctx) {
  if(scenario==='small-tie-budget')capacity.tieKeys=1;
  if(scenario==='small-group-budget')capacity.groups=1;
  if(scenario==='small-group-byte-budget')capacity.groupBytes=1;
+ if(scenario==='small-summary-row-budget')capacity.summaryRows=2;
  if(scenario==='small-response-budget')capacity.responseBytes=1000;
  if(scenario==='small-query-budget')capacity.statements=5;
  if(scenario==='database-failed')env={...env,DB:{prepare(){throw new Error('PRIVATE database failure')}}};
@@ -61,13 +69,14 @@ export default {async fetch(request, env, ctx) {
    const results=await original.batch(statements);countResults(statements,results);return results
   }}};
  }
- try{const response=await worker.fetch(request,env,ctx);response.headers.set('X-Test-Rows-Read',String(billedRows));response.headers.set('X-Test-Max-Bindings',String(maxBindings));response.headers.set('X-Test-Summary-Rows',String(summaryRows));return response}finally{Object.assign(capacity,saved)}
+ try{const response=await worker.fetch(request,env,ctx);response.headers.set('X-Test-Rows-Read',String(billedRows));response.headers.set('X-Test-Max-Bindings',String(maxBindings));response.headers.set('X-Test-Summary-Rows',String(summaryRows));if(admissionKey!==undefined)response.headers.set('X-Test-Admission-Key',admissionKey);return response}finally{Object.assign(capacity,saved)}
 }};`, resolveDir: new URL('..', import.meta.url).pathname, sourcefile: 'runtime-test-wrapper.ts' }, bundle: true, write: false, format: 'esm', platform: 'browser', logLevel: 'silent' })).outputFiles[0].text;
     mf = new Miniflare({ ...convertV4MiniflareOptions({ modules: true, script, compatibilityDate: '2026-10-26', d1Databases: { DB: 'synthetic' }, bindings: { TOKEN_HASH_SECRET: 'synthetic-test-secret', HOSTED_PUBLIC_BASE_URL: 'https://api.healthysync.app', MIGRATION_STATE: 'active' }, outboundService: () => new Response('Network disabled', { status: 502 }) }), resourcePersistencePath: directory });
     db = await mf.getD1Database('DB');
     const migrations = new URL('../migrations/', import.meta.url);
     for (const name of (await readdir(migrations)).filter(name=>name.endsWith('.sql')).sort()) {
-        await db.exec(await readFile(new URL(name,migrations),'utf8'));
+        const sql = await readFile(new URL(name, migrations), 'utf8');
+        await db.batch(unstable_splitSqlQuery(sql).map(statement => db.prepare(statement)));
     }
 });
 after(async () => { await mf?.dispose(); await rm(directory, { recursive: true, force: true }); });
@@ -121,6 +130,50 @@ test('atomic failure rolls back deletes, batches and device updates', async () =
     const r = await call('/api/apple-health/sync', a.ingest_token, payload([metric('bad', { end_at: '2020-01-01T00:00:00Z' })], { deletions: [{ id: 'keep', kind: 'metric' }] }));
     assert.equal(r.status, 500);
     assert.equal((await call('/api/agent/metrics', a.agent_token)).body.items[0].id, 'keep');
+    assert.equal(await db.prepare('SELECT 1 FROM ingest_deletions WHERE workspace_id=?').bind(a.workspace_id).first(), null);
+});
+test('HealthKit deletions survive out-of-order backfill and are scoped by workspace, device and kind', async () => {
+    const a = await provision(), b = await provision();
+    const id = 'healthkit:00000000-0000-4000-8000-000000000001';
+    const workout = { id, activity_type: 'walk', start_at: stamp, end_at: stamp, duration_seconds: 60, source_name: 'Synthetic' };
+    const sync = (token, rows, extra) => call('/api/apple-health/sync', token, payload(rows, extra));
+    assert.equal((await sync(a.ingest_token, [metric(id)], { workouts: [workout] })).status, 200);
+    assert.equal((await sync(a.ingest_token, [metric(id)], { device_id: 'second', export_id: 'second' })).status, 200);
+    assert.equal((await sync(b.ingest_token, [metric(id)])).status, 200);
+    const deletion = { export_id: 'delete', generated_at: '2026-03-08T05:00:00Z', deletions: [{ kind: 'metric', id }] };
+    const [deleted, retried] = await Promise.all([
+        sync(a.ingest_token, [], deletion),
+        sync(a.ingest_token, [metric(id)], { workouts: [workout] }),
+    ]);
+    assert.equal(deleted.body.deleted, 1);
+    assert.equal(retried.status, 200);
+    assert.equal((await sync(a.ingest_token, [], deletion)).body.deleted, 0);
+    assert.equal((await sync(a.ingest_token, [metric(id)], { export_id: 'later-backfill', generated_at: newer })).status, 200);
+    assert.deepEqual((await call('/api/agent/metrics', a.agent_token)).body.items.map(row => row.device_id), ['second']);
+    assert.equal((await call('/api/agent/workouts', a.agent_token)).body.items[0].id, id);
+    assert.equal((await call('/api/agent/metrics', b.agent_token)).body.items[0].id, id);
+    assert.equal((await call('/api/hosted/workspaces/reset', a.ingest_token, {})).status, 200);
+    assert.equal(await db.prepare('SELECT 1 FROM ingest_deletions WHERE workspace_id=?').bind(a.workspace_id).first(), null);
+});
+test('reusable ID deletions use client order and do not remove a newer correction', async () => {
+    const a = await provision(), id = 'healthkit:aggregate:steps:2026-03-08';
+    const sync = (rows, extra) => call('/api/apple-health/sync', a.ingest_token, payload(rows, extra));
+    const deletion = { export_id: 'delete', generated_at: newer, deletions: [{ kind: 'metric', id }] };
+    assert.equal((await sync([], deletion)).body.deleted, 0);
+    assert.equal((await sync([metric(id)], { generated_at: stamp })).status, 200);
+    assert.equal((await sync([metric(id)], { export_id: 'equal-time', generated_at: newer })).status, 200);
+    assert.deepEqual((await call('/api/agent/metrics', a.agent_token)).body.items, []);
+    const correction = { export_id: 'correction', generated_at: '2026-03-08T06:30:00.000004Z' };
+    assert.equal((await sync([metric(id, { value: 7 })], correction)).status, 200);
+    assert.equal((await sync([], deletion)).body.deleted, 0);
+    assert.equal((await sync([metric(id, { value: 5 })], { export_id: 'older-correction', generated_at: '2026-03-08T06:30:00.000003Z' })).status, 200);
+    assert.equal((await sync([metric(id)], { ...correction, generated_at: newer })).status, 409);
+    assert.equal((await call('/api/agent/metrics', a.agent_token)).body.items[0].value, 7);
+    const tied = { export_id: 'replace', generated_at: '2026-03-08T06:30:00.000005Z', deletions: deletion.deletions };
+    assert.equal((await sync([metric(id)], tied)).body.deleted, 1);
+    assert.equal((await sync([], { ...tied, export_id: 'independent-delete' })).body.deleted, 1);
+    assert.equal((await sync([metric(id)], tied)).status, 200);
+    assert.deepEqual((await call('/api/agent/metrics', a.agent_token)).body.items, []);
 });
 test('ICU ordering repairs huge timestamp ties and preserves microsecond boundaries', async () => {
     const a = await provision();
@@ -143,7 +196,7 @@ test('streamed preference spans pages, respects partial ranges and current expor
     const a = await provision();
     for (let i = 0; i < 5100; i += 300)
         assert.equal((await call('/api/apple-health/sync', a.ingest_token, payload(Array.from({ length: 300 }, (_, j) => metric('raw' + (i + j)))))).status, 200);
-    await call('/api/apple-health/sync', a.ingest_token, payload([metric('zz-daily', { value: 42, metadata: { aggregation: 'daily_sum' }, end_at: '2026-03-08T23:00:00Z' })]));
+    await call('/api/apple-health/sync', a.ingest_token, payload([metric('healthkit:aggregate:steps:2026-03-08', { value: 42, metadata: daily(), end_at: '2026-03-08T23:00:00Z' })]));
     await call('/api/apple-health/sync', a.ingest_token, payload([metric('other', { value: 3 })], { device_id: 'other-device', export_id: 'other-export' }));
     let r = await call('/api/agent/health-data?limit=1', a.agent_token);
     assert.equal(r.body.metric_daily_summaries[0].total_value, 45);
@@ -268,15 +321,12 @@ test('summary revisions coalesce writes, roll back failures and follow workout c
     await db.prepare('DELETE FROM health_workouts WHERE workspace_id=?').bind(a.workspace_id).run();
     assert.deepEqual((await call('/api/agent/health-data', a.agent_token)).body.workout_daily_summaries, []);
 });
-test('legacy ingest ordering preserves deletion counts after the revision migration', async () => {
+test('DELETE RETURNING counts only removed records despite revision and storage triggers', async () => {
     const a = await provision();
     await call('/api/apple-health/sync', a.ingest_token, payload([metric('one')]));
     await call('/api/agent/health-data', a.agent_token);
-    const results = await db.batch([
-        db.prepare('UPDATE workspace_devices SET last_seen_at=? WHERE workspace_id=?').bind(stamp, a.workspace_id),
-        db.prepare('DELETE FROM health_metrics WHERE workspace_id=?').bind(a.workspace_id),
-    ]);
-    assert.equal(results[1].meta.changes, 1);
+    const result = await db.prepare('DELETE FROM health_metrics WHERE workspace_id=? RETURNING id').bind(a.workspace_id).all();
+    assert.deepEqual(result.results, [{ id: 'one' }]);
     assert.deepEqual((await call('/api/agent/health-data', a.agent_token)).body.metric_daily_summaries, []);
 });
 test('health-data remains compatible before the summary migration is installed', async () => {
@@ -346,6 +396,23 @@ test('read revocation and changed selection fail explicitly without a partial bo
         assert.equal(r.body.items, undefined);
     }
 });
+test('admission limits provisioning by edge IP and bearer routes by credential before D1', async () => {
+    const provisionDenied = await call('/api/hosted/workspaces', null, {}, { 'X-Test-Scenario': 'provision-denied', 'CF-Connecting-IP': '192.0.2.10', 'X-Forwarded-For': '192.0.2.20' });
+    assert.equal(provisionDenied.headers.get('X-Test-Admission-Key'), '192.0.2.10');
+    const a = await provision();
+    const tokenHeaders = { 'X-Test-Scenario': 'token-denied' };
+    const ingestDenied = await call('/api/apple-health/sync', a.ingest_token, payload([metric('not-written')]), tokenHeaders);
+    const readDenied = await call('/api/agent/metrics', a.ingest_token, undefined, tokenHeaders);
+    const key = createHmac('sha256', 'synthetic-test-secret').update(a.ingest_token).digest('hex');
+    assert.equal(ingestDenied.headers.get('X-Test-Admission-Key'), key);
+    assert.equal(readDenied.headers.get('X-Test-Admission-Key'), key);
+    for (const r of [provisionDenied, ingestDenied, readDenied]) {
+        assert.equal(r.status, 429);
+        assert.equal(r.headers.get('Retry-After'), '60');
+        assert.equal(r.headers.get('X-Test-Rows-Read'), '0');
+    }
+    assert.deepEqual((await call('/api/agent/metrics', a.agent_token)).body.items, []);
+});
 test('explicit budgets fail without truncation, request parsing is bounded and invalid dates rejected', async () => {
     const a = await provision();
     await call('/api/apple-health/sync', a.ingest_token, payload([metric('one'), metric('two', { type: 'other' })]));
@@ -355,6 +422,38 @@ test('explicit budgets fail without truncation, request parsing is bounded and i
     assert.equal((await call('/api/hosted/workspaces', null, { label: 'a'.repeat(8 * 1024 * 1024) })).status, 413);
     const malformed = await mf.dispatchFetch('https://example.test/api/hosted/workspaces', { method: 'POST', body: '{' });
     assert.equal(malformed.status, 400);
+});
+test('summary budget counts candidates rejected by the end bound, without returning partial results', async () => {
+    const a = await provision(), long = { end_at: '2026-03-09T00:00:00Z' };
+    await call('/api/apple-health/sync', a.ingest_token, payload([metric('one'), metric('two', long), metric('three', long)]));
+    const headers = { 'X-Test-Scenario': 'small-summary-row-budget' };
+    const r = await call('/api/agent/health-data?to=2026-03-08T07:00:00Z', a.agent_token, undefined, headers);
+    assert.equal(r.status, 503);
+    assert.equal(r.headers.get('X-Test-Summary-Rows'), '3');
+    assert.equal(r.body.metric_daily_summaries, undefined);
+    const narrow = await call('/api/agent/health-data?from=2026-03-09', a.agent_token, undefined, headers);
+    assert.equal(narrow.status, 200);
+    assert.deepEqual(narrow.body.metric_daily_summaries, []);
+});
+test('durable workspace storage accounts for growth, rolls back rejection and credits deletions', async () => {
+    const a = await provision(), b = await provision();
+    const sync = (token, rows, extra) => call('/api/apple-health/sync', token, payload(rows, extra));
+    await sync(a.ingest_token, [metric('one')]);
+    const limit = 512 * 1024 * 1024;
+    await db.prepare('UPDATE workspace_ingest_storage SET growth_bytes=? WHERE workspace_id=?').bind(limit, a.workspace_id).run();
+    const growth = async () => (await db.prepare('SELECT growth_bytes FROM workspace_ingest_storage WHERE workspace_id=?').bind(a.workspace_id).first()).growth_bytes;
+    assert.equal((await sync(a.ingest_token, [metric('one', { value: 5 })])).status, 200);
+    assert.equal((await sync(a.ingest_token, [metric('one', { metadata: { note: 'more text' } })])).status, 507);
+    assert.equal((await sync(a.ingest_token, [metric('two')])).status, 507);
+    assert.equal(await growth(), limit);
+    assert.equal((await call('/api/agent/metrics', a.agent_token)).body.items[0].value, 5);
+    assert.equal((await sync(b.ingest_token, [metric('two')])).status, 200);
+    const deletion = { deletions: [{ kind: 'metric', id: 'one' }] };
+    assert.equal((await sync(a.ingest_token, [], deletion)).body.deleted, 1);
+    const after = await growth();
+    assert(after < limit);
+    assert.equal((await sync(a.ingest_token, [], deletion)).body.deleted, 0);
+    assert.equal(await growth(), after);
 });
 test('more than 500 exports enrich via joins and empty uploads preserve the old sync', async () => {
     const a = await provision();
@@ -410,16 +509,30 @@ test('both partial boundary groups, interior groups, ICU-equal devices and sync 
 });
 test('daily preference is per device and unit; both markers combine; metadata scalars stay ordinary', async () => {
     const a = await provision();
-    await call('/api/apple-health/sync', a.ingest_token, payload([metric('raw', { value: 100 }), metric('sum', { value: 12, metadata: { aggregation: 'daily_sum' } }), metric('avg', { value: 6, metadata: { aggregation: 'daily_average' } }), metric('other-unit', { value: 4, unit: 'different' }), metric('scalar', { value: 77 })]));
-    await db.prepare("UPDATE health_metrics SET metadata=? WHERE workspace_id=? AND id='scalar'").bind('"daily_sum"', a.workspace_id).run();
+    const scalar = 'healthkit:aggregate:steps:2026-03-07';
+    await call('/api/apple-health/sync', a.ingest_token, payload([metric('raw', { value: 100 }), metric('healthkit:aggregate:steps:2026-03-08', { value: 12, metadata: daily() }), metric('other-unit', { value: 4, unit: 'different' }), metric(scalar, { value: 77 })]));
+    await db.prepare('UPDATE health_metrics SET metadata=? WHERE workspace_id=? AND id=?').bind('"daily_sum"', a.workspace_id, scalar).run();
     await call('/api/apple-health/sync', a.ingest_token, payload([metric('other-device', { value: 3 })], { device_id: 'second', export_id: 'second-export' }));
+    await call('/api/apple-health/sync', a.ingest_token, payload([metric('raw', { value: 100 }), metric('healthkit:aggregate:steps:2026-03-08', { value: 6, metadata: daily('daily_average') })], { device_id: 'third', export_id: 'third-export' }));
     let r = await call('/api/agent/health-data?device_id=does-not-filter-metrics', a.agent_token);
-    assert.equal(r.body.metrics.length, 6);
+    assert.equal(r.body.metrics.length, 7);
     assert.equal(r.body.syncs.length, 0);
     assert.deepEqual(r.body.metric_daily_summaries.find(x => x.unit === 'count'), { local_date: '2026-03-08', type: 'steps', unit: 'count', sample_count: 3, total_value: 21, average_value: 7, minimum_value: 3, maximum_value: 12 });
     r = await call('/api/agent/health-data?type=absent', a.agent_token);
     assert.equal(r.body.metric_daily_summaries.length, 0);
-    assert.equal(r.body.syncs.length, 2);
+    assert.equal(r.body.syncs.length, 3);
+});
+test('raw UUID metadata and malformed aggregate IDs cannot override raw daily counts', async () => {
+    const a = await provision();
+    const rows = [metric('raw'),
+        metric('healthkit:00000000-0000-4000-8000-000000000002', { metadata: daily() }),
+        metric('healthkit:aggregate:other:2026-03-08', { metadata: daily() }),
+        metric('healthkit:aggregate:steps:2026-02-30', { metadata: daily() }),
+        metric('healthkit:aggregate:steps:2026-03-08', { metadata: { aggregation: 'daily_sum' } })];
+    assert.equal((await call('/api/apple-health/sync', a.ingest_token, payload(rows))).status, 200);
+    const r = await call('/api/agent/health-data', a.agent_token);
+    assert.equal(r.body.metric_daily_summaries[0].sample_count, rows.length);
+    assert.equal(r.body.metric_daily_summaries[0].total_value, rows.length);
 });
 test('timezone aliases, fallback, DST, historical offsets, current exports and microsecond wire values', async () => {
     const a = await provision();
@@ -468,7 +581,7 @@ test('deletion counts precede duplicates and duplicate payload IDs obey source c
     assert.equal(r.status, 500);
     assert.equal((await call('/api/agent/metrics', a.agent_token)).body.items[0].value, 3);
     const input = [metric('same'), ...Array.from({ length: 99 }, (_, i) => metric('between' + i)), metric('same', { value: 7 })];
-    r = await call('/api/apple-health/sync', a.ingest_token, payload(input));
+    r = await call('/api/apple-health/sync', a.ingest_token, payload(input, { generated_at: newer, export_id: 'correction' }));
     assert.equal(r.status, 200);
     assert.equal(r.body.received, 101);
     assert.equal(r.body.duplicates, 2);
@@ -513,7 +626,7 @@ test('ICU-equivalent metric summaries retain v10 first-record order across scan 
     await call('/api/apple-health/sync', a.ingest_token, payload([
         metric('A', {type:composed,value:2}),
         metric('a', {type:decomposed,value:100}),
-        metric('z', {type:decomposed,value:7,metadata:{aggregation:'daily_sum'}}),
+        metric(`healthkit:aggregate:${decomposed}:2026-03-08`, {type:decomposed,value:7,metadata:daily()}),
         metric('seed', {type:'padding'})
     ]));
     await db.prepare("WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<5000) INSERT INTO health_metrics SELECT workspace_id,device_id,printf('B%05d',x),type,value,unit,start_at,end_at,source_name,source_bundle_id,metadata,export_id FROM health_metrics,n WHERE workspace_id=? AND id='seed'").bind(a.workspace_id).run();

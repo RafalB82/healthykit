@@ -119,7 +119,7 @@ def create_app(
         db: Session = Depends(get_db),
         x_app_version: Annotated[str | None, Header(alias="X-App-Version")] = None,
     ) -> UploadResult:
-        return persist_sync_payload(db, payload, x_app_version, auth.workspace_id)
+        return persist_sync_payload(db, payload, x_app_version, auth.workspace_id, self_hosted=auth.self_hosted)
 
     @app.get("/api/apple-health/metrics", response_model=MetricListResponse)
     def apple_health_metrics(

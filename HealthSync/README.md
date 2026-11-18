@@ -18,8 +18,9 @@ Choose a storage destination during onboarding. For local testing, use the [pers
 ## Health data and sync
 
 - **Core** is the default on a fresh install: steps, walking/running distance, workouts, sleep, body mass, heart rate, and active energy. **Fitness** adds activity, heart fitness, and body composition types. **Everything** selects all supported types. Workouts also request read access to related energy, distance, heart rate, and effort types when supported.
-- Review the selection before granting read access. To change it later, use **Settings → Health Data → Save selection**. An app update does not reset a selection already saved.
+- Review the selection before granting read access. To change it later, use **Settings → Health Data → Save selection**. Saving a narrower selection removes unsent samples from disabled categories but keeps deletions that remove data already exported. It does not erase samples already uploaded. HealthKit does not disclose read-permission revocations to the app; narrow the saved app selection or clear the queue to stop pending retries.
 - Incremental sync advances HealthKit anchors only after the additions and deletions are durably queued. Failed uploads can be retried by a later sync. Uploaded batches are pruned after seven days on app startup.
+- The first launch after the credential-binding upgrade discards older pending batches whose approved credentials cannot be established. Existing custom backends require re-entering the token and choosing **Save and Test** once. Changing a destination or its upload token discards its pending queue, even at the same URL. HealthKit data, saved categories and local anchors are kept. Use an explicit backfill for any missing records you intend to send to the confirmed destination.
 - New installs use hourly best-effort background sync. HealthKit observers, `BGAppRefreshTask`, and an in-app timer/catch-up check can start sync. **Manual only** cancels scheduled app refreshes and HealthKit background delivery. Lock state, Low Power Mode, reboots, force-quitting, and system scheduling can delay background runs. Verify background delivery on an iPhone, not the simulator.
 
 ### Historical sync
@@ -28,7 +29,7 @@ Choose a storage destination during onboarding. For local testing, use the [pers
 
 Both modes process up to 30 days at a time. Original samples are read in pages of up to 100 records and each page is queued and uploaded before reading the next. In original mode, workouts and category samples are selected by start time and retain their full end time. Sleep still uses overlap queries. Keep the app open during a long backfill.
 
-Backfill does not delete previously uploaded daily summaries. When reading data, distinguish original samples from records with `metadata.aggregation`; do not add the two together.
+Backfill does not delete previously uploaded daily summaries. When reading data, distinguish original samples from daily records with both a `healthkit:aggregate:` ID and `metadata.aggregation`; do not add the two together.
 
 ## Tests
 

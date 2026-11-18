@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, String
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -68,6 +68,13 @@ class AccessTokenRecord(Base):
     __table_args__ = (
         CheckConstraint("kind IN ('ingest', 'agent_read')", name="ck_access_tokens_kind"),
         Index("ix_access_tokens_token_hash", "token_hash", unique=True),
+        Index(
+            "uq_access_tokens_active_agent",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("kind = 'agent_read' AND revoked_at IS NULL"),
+            sqlite_where=text("kind = 'agent_read' AND revoked_at IS NULL"),
+        ),
     )
 
 

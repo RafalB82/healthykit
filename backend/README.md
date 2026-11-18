@@ -93,6 +93,8 @@ alembic upgrade head
 uvicorn backend.main:app --host 0.0.0.0 --port 8080
 ```
 
+When upgrading an existing optional workspace deployment to `20261118_0006`, stop old API instances before running the migration, then start the new code. The migration keeps only the newest active agent token per workspace if older rotations left duplicates. The new unique index is incompatible with the old insert-before-revoke rotation code.
+
 Provision a workspace:
 
 ```bash

@@ -16,6 +16,10 @@
     "HOSTED_PUBLIC_BASE_URL": "https://api.healthysync.app",
     "MIGRATION_STATE": "active"
   },
+  "ratelimits": [
+    { "name": "PROVISION_LIMITER", "namespace_id": "47001", "simple": { "limit": 10, "period": 60 } },
+    { "name": "TOKEN_LIMITER", "namespace_id": "47002", "simple": { "limit": 300, "period": 60 } }
+  ],
   "d1_databases": [
     {
       "binding": "DB",

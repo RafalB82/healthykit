@@ -117,11 +117,12 @@ test('passes redirects and JSON errors through once without following or replayi
         const proxy = bridge(async (_url, init) => {
             calls++;
             assert.equal(init.redirect, 'manual');
-            return new Response('{"detail":"synthetic upstream"}', { status, headers: { Location: 'https://other.example', 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } });
+            return new Response('{"detail":"synthetic upstream"}', { status, headers: { Location: 'https://other.example', 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', ...(status === 429 ? { 'Retry-After': '60' } : {}) } });
         });
         const response = await proxy.handle(request('/healthsync/api/hosted/workspaces/reset', { method: 'POST', body: '{}' }));
         assert.equal(response.status, status);
         assert.equal(response.headers.get('location'), 'https://other.example');
+        assert.equal(response.headers.get('Retry-After'), status === 429 ? '60' : null);
         assert.equal(await response.text(), '{"detail":"synthetic upstream"}');
         assert.equal(calls, 1);
         assert.equal(proxy.timers.size, 0);
