@@ -1,5 +1,6 @@
 import XCTest
 import HealthKit
+import SwiftUI
 @testable import HealthSync
 
 final actor SyncEngineTestsStore: BatchPersisting {
@@ -876,16 +877,40 @@ private final class NetworkRecordingURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         Self.lock.withLock { Self.recorded.append(request.url?.absoluteString ?? "") }
-        if let url = request.url, url.host == "reject.example" {
-            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: Data(#"{"ok":false,"received":0,"duplicates":0}"#.utf8))
-            client?.urlProtocolDidFinishLoading(self)
-        } else {
+        guard let url = request.url else { return }
+        let body: String
+        switch (url.host, url.path) {
+        case ("stall.example", _): return // The active sync stays in flight until Save stops it.
+        case ("reject.example", _): body = #"{"ok":false,"received":0,"duplicates":0}"#
+        case ("mine.example", _): body = #"{"ok":true,"received":0,"duplicates":0}"#
+        case ("api.healthysync.app", "/api/hosted/agent-token"):
+            body = #"{"workspace_id":"existing","agent_endpoint":"https://api.healthysync.app/api/agent/health-data","agent_token":"refreshed"}"#
+        case ("api.healthysync.app", "/api/hosted/workspaces/reset"):
+            body = #"{"workspace_id":"replacement","backend_url":"https://api.healthysync.app","agent_endpoint":"https://api.healthysync.app/api/agent/health-data","ingest_token":"replacement-ingest","agent_token":"replacement-agent"}"#
+        default:
             client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+            return
         }
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+private final class MemoryKeychain: TokenProviding {
+    var token: String?
+    var hostedIngestToken: String?
+    var hostedAgentToken: String?
+
+    func readToken() -> String? { token }
+    func saveToken(_ token: String) { self.token = token }
+    func deleteToken() { token = nil }
+    func readHostedIngestToken() -> String? { hostedIngestToken }
+    func saveHostedIngestToken(_ token: String) { hostedIngestToken = token }
+    func readHostedAgentToken() -> String? { hostedAgentToken }
+    func saveHostedAgentToken(_ token: String) { hostedAgentToken = token }
 }
 
 @MainActor
@@ -899,10 +924,25 @@ final class StorageOptInAppStateTests: XCTestCase {
         FileManager.default.temporaryDirectory.appendingPathComponent("OptIn-\(UUID()).sqlite")
     }
 
-    private func makeAppState(databaseURL: URL) -> AppState {
+    private func makeAppState(databaseURL: URL, keychain: MemoryKeychain = MemoryKeychain()) -> AppState {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [NetworkRecordingURLProtocol.self]
-        return AppState(storeURL: databaseURL, apiSession: URLSession(configuration: configuration))
+        return AppState(storeURL: databaseURL, keychain: keychain, apiSession: URLSession(configuration: configuration))
+    }
+
+    private func pendingBatch(for destination: String) -> SyncBatch {
+        SyncBatch(payload: .empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"),
+                  destination: destination)
+    }
+
+    private func syncReadySettings(mode: StorageMode?, backendURL: String = "") -> AppSettings {
+        var settings = AppSettings.default
+        settings.storageMode = mode
+        settings.backendURL = backendURL
+        settings.hasRequestedHealthPermissions = true
+        // Retry a queued batch without depending on any Health samples on the simulator.
+        settings.selectedTypes = []
+        return settings
     }
 
     func testFreshInstallNeverProvisionsOrUploadsBeforeChoosingStorage() async throws {
@@ -935,11 +975,12 @@ final class StorageOptInAppStateTests: XCTestCase {
     func testAutomaticSyncDoesNotStartWithoutDestinationEvenWithHealthAccess() async throws {
         let url = databaseURL()
         let seed = try SQLiteLocalStore(url: url)
-        var settings = AppSettings.default
-        settings.hasRequestedHealthPermissions = true
-        try await seed.saveSettings(settings)
+        try await seed.saveSettings(syncReadySettings(mode: nil))
+        try await seed.enqueueBatch(pendingBatch(for: AppSettings.hostedBackendURL))
+        let keychain = MemoryKeychain()
+        keychain.hostedIngestToken = "old-hosted-token"
 
-        let appState = makeAppState(databaseURL: url)
+        let appState = makeAppState(databaseURL: url, keychain: keychain)
         await appState.bootstrap()
         await appState.sceneDidEnterBackground()
         await appState.performBackgroundSync()
@@ -950,20 +991,64 @@ final class StorageOptInAppStateTests: XCTestCase {
         XCTAssertEqual(NetworkRecordingURLProtocol.requests, [])
     }
 
-    func testOwnBackendNegativeAcknowledgementDoesNotSaveDestination() async throws {
+    func testSelectingHostedDraftAndApplyingFrequencyNeverUploadsToHosted() async throws {
         let url = databaseURL()
-        let appState = makeAppState(databaseURL: url)
+        let store = try SQLiteLocalStore(url: url)
+        try await store.saveSettings(syncReadySettings(mode: .customBackend, backendURL: "https://mine.example"))
+        try await store.enqueueBatch(pendingBatch(for: "https://mine.example"))
+        try await store.enqueueBatch(pendingBatch(for: AppSettings.hostedBackendURL))
+        let keychain = MemoryKeychain()
+        keychain.token = "custom-token"
+        keychain.hostedIngestToken = "old-hosted-token"
+        let appState = makeAppState(databaseURL: url, keychain: keychain)
         await appState.bootstrap()
 
+        var modeDraft: StorageMode?
+        let menu = SettingsStorageModeMenu(appState: appState, draft: Binding(get: { modeDraft }, set: { modeDraft = $0 }))
+        menu.select(.hostedHealthSync)
+        _ = await appState.syncIncremental()
+        await appState.sceneDidBecomeActive()
+        await appState.setSyncFrequency(.dailyBestEffort)
+        await appState.applySyncFrequency()
+        await appState.performBackgroundSync()
+
+        XCTAssertEqual(modeDraft, .hostedHealthSync)
+        XCTAssertEqual(NetworkRecordingURLProtocol.requests, ["https://mine.example/api/apple-health/sync"])
+        XCTAssertEqual(appState.settings.storageMode, .customBackend)
+        let persisted = try await store.loadSettings()
+        XCTAssertEqual(persisted.storageMode, .customBackend)
+        XCTAssertEqual(persisted.syncFrequency, .dailyBestEffort)
+
+        let confirmed = await appState.useHostedStorage()
+        XCTAssertTrue(confirmed)
+        let hosted = try await store.loadSettings()
+        XCTAssertEqual(hosted.storageMode, .hostedHealthSync)
+        XCTAssertEqual(NetworkRecordingURLProtocol.requests, ["https://mine.example/api/apple-health/sync"])
+    }
+
+    func testOwnBackendNegativeAcknowledgementDoesNotSaveDestination() async throws {
+        let url = databaseURL()
+        let store = try SQLiteLocalStore(url: url)
+        try await store.saveSettings(syncReadySettings(mode: .customBackend, backendURL: "https://mine.example"))
+        try await store.enqueueBatch(pendingBatch(for: "https://mine.example"))
+        let keychain = MemoryKeychain()
+        keychain.token = "original-token"
+        let appState = makeAppState(databaseURL: url, keychain: keychain)
+        await appState.bootstrap()
+
+        let savedWithoutToken = await appState.useOwnBackend(backendURL: "https://reject.example", tokenDraft: "")
+        XCTAssertFalse(savedWithoutToken)
+        XCTAssertEqual(NetworkRecordingURLProtocol.requests, [])
         let saved = await appState.useOwnBackend(backendURL: "https://reject.example", tokenDraft: "test-token")
         XCTAssertFalse(saved)
         XCTAssertEqual(NetworkRecordingURLProtocol.requests, ["https://reject.example/api/apple-health/sync"])
         XCTAssertEqual(appState.lastError, APIClientError.invalidResponse.userMessage)
-        XCTAssertFalse(appState.hasChosenStorageDestination)
-        let reopened = try SQLiteLocalStore(url: url)
-        let persisted = try await reopened.loadSettings()
-        XCTAssertNil(persisted.storageMode)
-        XCTAssertTrue(persisted.backendURL.isEmpty)
+        XCTAssertEqual(appState.backendFeedback?.kind, .error)
+        await appState.applySyncFrequency()
+        let persisted = try await store.loadSettings()
+        XCTAssertEqual(persisted.backendURL, "https://mine.example")
+        XCTAssertEqual(keychain.token, "original-token")
+        XCTAssertEqual(appState.status.pendingUploadCount, 1)
     }
 
     func testSwitchingDestinationDiscardsBatchesQueuedForThePreviousOneInsteadOfSendingThem() async throws {
@@ -972,21 +1057,81 @@ final class StorageOptInAppStateTests: XCTestCase {
         var settings = AppSettings.default
         settings.storageMode = .hostedHealthSync
         try await seed.saveSettings(settings)
-        try await seed.enqueueBatch(SyncBatch(
-            payload: .empty(deviceID: "device", dateRange: SyncDateRange(start: .distantPast, end: .distantPast), timezone: "UTC"),
-            destination: AppSettings.hostedBackendURL
-        ))
+        try await seed.enqueueBatch(pendingBatch(for: AppSettings.hostedBackendURL))
 
         let appState = makeAppState(databaseURL: url)
         await appState.bootstrap()
         XCTAssertEqual(appState.status.pendingUploadCount, 1)
 
-        appState.settings.storageMode = .customBackend
-        appState.settings.backendURL = "https://mine.example"
-        await appState.saveSettingsAndToken()
+        let saved = await appState.useOwnBackend(backendURL: "https://mine.example", tokenDraft: "custom-token")
+        XCTAssertTrue(saved)
 
         XCTAssertEqual(appState.status.pendingUploadCount, 0)
         XCTAssertTrue(appState.logs.contains { $0.message.hasPrefix("Discarded 1 queued uploads") && $0.message.contains("mine.example") })
-        XCTAssertEqual(NetworkRecordingURLProtocol.requests, [])
+        XCTAssertEqual(NetworkRecordingURLProtocol.requests, ["https://mine.example/api/apple-health/sync"])
+    }
+
+    func testSaveAndTestStayResponsiveDuringAnActiveSync() async throws {
+        let url = databaseURL()
+        let store = try SQLiteLocalStore(url: url)
+        try await store.saveSettings(syncReadySettings(mode: .customBackend, backendURL: "https://stall.example"))
+        try await store.enqueueBatch(pendingBatch(for: "https://stall.example"))
+        let keychain = MemoryKeychain()
+        keychain.token = "original-token"
+        let appState = makeAppState(databaseURL: url, keychain: keychain)
+        await appState.bootstrap()
+        let sync = Task { await appState.syncIncremental() }
+        defer { sync.cancel() }
+        for _ in 0..<200 where NetworkRecordingURLProtocol.requests.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(NetworkRecordingURLProtocol.requests, ["https://stall.example/api/apple-health/sync"])
+        XCTAssertTrue(appState.canStopSync)
+
+        await appState.testConnection(backendURL: "https://mine.example", tokenDraft: "new-token")
+        XCTAssertEqual(appState.backendFeedback?.kind, .success)
+        XCTAssertTrue(appState.canStopSync)
+        let beforeSave = try await store.loadSettings()
+        XCTAssertEqual(beforeSave.backendURL, "https://stall.example")
+
+        let saved = await appState.useOwnBackend(backendURL: "https://mine.example", tokenDraft: "new-token")
+        XCTAssertTrue(saved)
+        XCTAssertFalse(appState.canStopSync)
+        let persisted = try await store.loadSettings()
+        XCTAssertEqual(persisted.backendURL, "https://mine.example")
+        XCTAssertEqual(keychain.token, "new-token")
+        XCTAssertEqual(appState.status.pendingUploadCount, 0)
+        XCTAssertTrue(appState.backendFeedback?.message.contains("running sync was stopped") == true)
+    }
+
+    func testRefreshingHostedAgentTokenDoesNotSwitchDestination() async throws {
+        let url = databaseURL()
+        let store = try SQLiteLocalStore(url: url)
+        try await store.saveSettings(syncReadySettings(mode: .customBackend, backendURL: "https://mine.example"))
+        let keychain = MemoryKeychain()
+        keychain.hostedIngestToken = "old-hosted-token"
+        let appState = makeAppState(databaseURL: url, keychain: keychain)
+        await appState.bootstrap()
+        await appState.refreshHostedAgentToken()
+
+        XCTAssertEqual(keychain.hostedAgentToken, "refreshed")
+        let saved = try await store.loadSettings()
+        XCTAssertEqual(saved.storageMode, .customBackend)
+        XCTAssertEqual(appState.settings.storageMode, .customBackend)
+    }
+
+    func testConfirmedHostedResetClearsPendingUploadsEvenForTheSameEndpoint() async throws {
+        let url = databaseURL()
+        let store = try SQLiteLocalStore(url: url)
+        try await store.saveSettings(syncReadySettings(mode: .hostedHealthSync))
+        try await store.enqueueBatch(pendingBatch(for: AppSettings.hostedBackendURL))
+        let keychain = MemoryKeychain()
+        keychain.hostedIngestToken = "old-hosted-token"
+        let appState = makeAppState(databaseURL: url, keychain: keychain)
+        await appState.bootstrap()
+        await appState.resetHostedStorage()
+        XCTAssertEqual(appState.settings.hostedWorkspaceID, "replacement")
+        XCTAssertEqual(appState.status.pendingUploadCount, 0)
+        XCTAssertTrue(appState.logs.contains { $0.message.contains("won't be re-sent") })
     }
 }

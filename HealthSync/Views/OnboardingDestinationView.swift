@@ -3,15 +3,23 @@ import SwiftUI
 enum OnboardingDestinationCopy {
     static let intro = "HealthSync uploads nothing until you confirm a destination. You can change it later in Settings, and data queued for one destination is never sent to another."
     static let ownBackend = "Uploads go only to the server you enter. HealthSync never copies them anywhere else."
-    static let hosted = "HealthSync creates a private workspace on its own servers (api.healthysync.app). The Apple Health data you select is uploaded and stored there, and you can read it back through a private read-only agent endpoint. Choose this only if you want HealthSync to store your health data."
+    static let hosted = "Selected Apple Health data will be uploaded to HealthSync’s hosted storage (api.healthysync.app). HealthSync stores it in a private workspace on Cloudflare’s infrastructure in the United States."
 }
 
 struct OnboardingDestinationView: View {
     @EnvironmentObject private var appState: AppState
     @State private var choice: StorageMode?
-    @State private var backendURL = ""
+    @State private var backendURL: String
     @State private var tokenDraft = ""
     @State private var testedBackendURL: String?
+    @State private var confirmedHosted = false
+
+    init(initialSettings: AppSettings) {
+        _choice = State(initialValue: initialSettings.storageMode)
+        _backendURL = State(initialValue: initialSettings.backendURL)
+    }
+
+    private var isBusy: Bool { appState.isBusy || appState.isSavingSettings }
 
     private var isConfirmed: Bool {
         guard let choice, appState.settings.storageMode == choice, appState.hasChosenStorageDestination else {
@@ -21,7 +29,7 @@ struct OnboardingDestinationView: View {
         case .customBackend:
             return testedBackendURL == backendURL && tokenDraft.isEmpty
         case .hostedHealthSync:
-            return true
+            return confirmedHosted
         }
     }
 
@@ -49,7 +57,7 @@ struct OnboardingDestinationView: View {
                         color: HealthSyncTheme.primaryBlue,
                         isSelected: choice == .customBackend
                     ) { choice = .customBackend }
-                    .disabled(appState.isBusy)
+                    .disabled(isBusy)
                     .accessibilityIdentifier("onboarding-destination-own-backend")
 
                     if choice == .customBackend {
@@ -63,7 +71,7 @@ struct OnboardingDestinationView: View {
                         color: .purple,
                         isSelected: choice == .hostedHealthSync
                     ) { choice = .hostedHealthSync }
-                    .disabled(appState.isBusy)
+                    .disabled(isBusy)
                     .accessibilityIdentifier("onboarding-destination-hosted")
 
                     if choice == .hostedHealthSync {
@@ -79,10 +87,10 @@ struct OnboardingDestinationView: View {
                 Text(isConfirmed ? "Continue" : "Confirm a destination to continue")
             }
             .buttonStyle(HealthSyncTheme.PrimaryButtonStyle(
-                isBusy: appState.isBusy,
+                isBusy: isBusy,
                 gradient: isConfirmed ? HealthSyncTheme.heartGradient : HealthSyncTheme.disabledGradient
             ))
-            .disabled(!isConfirmed || appState.isBusy)
+            .disabled(!isConfirmed || isBusy)
             .padding(.horizontal, 24)
             .padding(.bottom, 8)
             .accessibilityIdentifier("onboarding-destination-continue")
@@ -90,7 +98,7 @@ struct OnboardingDestinationView: View {
         .onChange(of: choice) { _, _ in appState.lastError = nil }
         .navigationTitle("Storage Destination")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationBarBackButtonHidden(appState.isBusy)
+        .navigationBarBackButtonHidden(isBusy)
     }
 
     private var ownBackendForm: some View {
@@ -103,7 +111,7 @@ struct OnboardingDestinationView: View {
                 .keyboardType(.URL)
                 .autocorrectionDisabled()
                 .textFieldStyle(.roundedBorder)
-                .disabled(appState.isBusy)
+                .disabled(isBusy)
 
             Text("Auth token")
                 .font(.caption.weight(.semibold))
@@ -112,7 +120,7 @@ struct OnboardingDestinationView: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .textFieldStyle(.roundedBorder)
-                .disabled(appState.isBusy)
+                .disabled(isBusy)
 
             Button {
                 Task {
@@ -124,14 +132,14 @@ struct OnboardingDestinationView: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    if appState.isBusy {
+                    if isBusy {
                         ProgressView().tint(.white)
                     }
-                    Text(appState.isBusy ? "Testing…" : "Save and Test")
+                    Text(isBusy ? "Testing…" : "Save and Test")
                 }
             }
-            .buttonStyle(HealthSyncTheme.PrimaryButtonStyle(isBusy: appState.isBusy, gradient: HealthSyncTheme.stepsGradient))
-            .disabled(appState.isBusy)
+            .buttonStyle(HealthSyncTheme.PrimaryButtonStyle(isBusy: isBusy, gradient: HealthSyncTheme.stepsGradient))
+            .disabled(isBusy)
             .accessibilityIdentifier("onboarding-own-backend-save-test")
 
             if isConfirmed, let destination = appState.settings.uploadDestination {
@@ -156,17 +164,23 @@ struct OnboardingDestinationView: View {
                 confirmation("Hosted storage is ready. Uploads will go to \(UploadConfiguration.host(of: AppSettings.hostedBackendURL)).")
             } else {
                 Button {
-                    Task { await appState.createHostedStorage() }
+                    Task {
+                        if appState.hasHostedIngestToken {
+                            confirmedHosted = await appState.useHostedStorage()
+                        } else {
+                            confirmedHosted = await appState.createHostedStorage()
+                        }
+                    }
                 } label: {
                     HStack(spacing: 8) {
-                        if appState.isBusy {
+                        if isBusy {
                             ProgressView().tint(.white)
                         }
-                        Text(appState.isBusy ? "Creating…" : "Create Hosted Storage")
+                        Text(isBusy ? "Saving…" : appState.hasHostedIngestToken ? "Use Hosted Storage" : "Create Hosted Storage")
                     }
                 }
-                .buttonStyle(HealthSyncTheme.PrimaryButtonStyle(isBusy: appState.isBusy, gradient: HealthSyncTheme.stepsGradient))
-                .disabled(appState.isBusy)
+                .buttonStyle(HealthSyncTheme.PrimaryButtonStyle(isBusy: isBusy, gradient: HealthSyncTheme.stepsGradient))
+                .disabled(isBusy)
                 .accessibilityIdentifier("onboarding-create-hosted-storage")
                 errorMessage
             }
@@ -176,7 +190,7 @@ struct OnboardingDestinationView: View {
 
     @ViewBuilder
     private var errorMessage: some View {
-        if !appState.isBusy, let error = appState.lastError {
+        if !isBusy, let error = appState.lastError {
             Label(error, systemImage: "exclamationmark.circle.fill")
                 .font(.footnote.weight(.medium))
                 .foregroundStyle(HealthSyncTheme.primaryRed)

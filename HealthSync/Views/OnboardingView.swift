@@ -93,7 +93,7 @@ struct OnboardingView: View {
                             HealthActionFeedbackBanner(feedback: feedback)
                         }
                         
-                        NavigationLink(value: appState.hasChosenStorageDestination ? OnboardingStep.healthData : .destination) {
+                        NavigationLink(value: OnboardingStep.destination) {
                             Text("Continue")
                         }
                         .buttonStyle(HealthSyncTheme.PrimaryButtonStyle(isBusy: appState.isBusy, gradient: HealthSyncTheme.heartGradient))
@@ -106,7 +106,7 @@ struct OnboardingView: View {
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: OnboardingStep.self) { step in
                 switch step {
-                case .destination: OnboardingDestinationView()
+                case .destination: OnboardingDestinationView(initialSettings: appState.settings)
                 case .healthData: OnboardingHealthDataView()
                 }
             }

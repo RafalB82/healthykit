@@ -192,6 +192,20 @@ struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
     @State private var isSupportPromptPresented = false
     @State private var isResetHostedStorageConfirmationPresented = false
+    @State private var isUseHostedStorageConfirmationPresented = false
+    @State private var storageModeDraft: StorageMode?
+    @State private var backendURLDraft: String?
+    @State private var tokenDraft = ""
+
+    private var displayedStorageMode: StorageMode? { storageModeDraft ?? appState.settings.storageMode }
+
+    private var backendURLField: Binding<String> {
+        Binding(get: { backendURLDraft ?? appState.settings.backendURL }, set: { backendURLDraft = $0 })
+    }
+
+    private var destinationControlsDisabled: Bool {
+        appState.isSavingSettings || appState.isTestingConnection || (appState.isBusy && !appState.canStopSync)
+    }
 
     var body: some View {
         NavigationStack {
@@ -250,6 +264,14 @@ struct SettingsView: View {
             .sheet(isPresented: $isSupportPromptPresented) {
                 SupportDevelopmentSheet(prompt: .current)
             }
+            .alert("Use hosted storage?", isPresented: $isUseHostedStorageConfirmationPresented) {
+                Button("Use hosted storage") {
+                    Task { await appState.useHostedStorage() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(OnboardingDestinationCopy.hosted)
+            }
             .confirmationDialog(
                 "Reset hosted storage?",
                 isPresented: $isResetHostedStorageConfirmationPresented,
@@ -260,7 +282,7 @@ struct SettingsView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This deletes the current hosted workspace data when the saved token is still valid, then creates a new hosted workspace and fresh agent token.")
+                Text("This deletes the current hosted workspace data when the saved token is still valid, then creates a new hosted workspace and fresh agent token. Pending uploads on this iPhone will also be discarded.")
             }
         }
     }
@@ -327,35 +349,24 @@ struct SettingsView: View {
         ) {
             SettingsPickerRow(
                 title: "Mode",
-                detail: appState.settings.storageMode?.label ?? "Not chosen",
+                detail: displayedStorageMode?.label ?? "Not chosen",
                 systemImage: "externaldrive.connected.to.line.below",
                 color: .purple
             ) {
-                Menu {
-                    ForEach(StorageMode.allCases) { mode in
-                        Button {
-                            Task { await appState.setStorageMode(mode) }
-                        } label: {
-                            HStack {
-                                Text(mode.label)
-                                if appState.settings.storageMode == mode {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 32, height: 32)
-                        .background(Color.primary.opacity(0.05))
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                }
-                .disabled(appState.isSavingSettings || (appState.isBusy && !appState.canStopSync))
+                SettingsStorageModeMenu(appState: appState, draft: $storageModeDraft)
+                    .disabled(destinationControlsDisabled)
             }
 
-            if appState.settings.storageMode == .hostedHealthSync {
+            if displayedStorageMode != appState.settings.storageMode {
+                SettingsInfoBanner(
+                    text: appState.settings.storageMode.map { "Not active yet. Uploads still use \($0.label)." }
+                        ?? "Not active yet. No health data is uploaded.",
+                    systemImage: "info.circle",
+                    color: .secondary
+                )
+            }
+
+            if displayedStorageMode == .hostedHealthSync {
                 SettingsDivider()
                 hostedStorageControls
             }
@@ -364,7 +375,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var manualBackendCard: some View {
-        if appState.settings.storageMode?.showsManualBackendSettings == true {
+        if displayedStorageMode?.showsManualBackendSettings == true {
             SettingsCard(
                 title: "Backend Configuration",
                 subtitle: "Point HealthSync at your own ingestion endpoint.",
@@ -376,42 +387,48 @@ struct SettingsView: View {
                     systemImage: "link",
                     color: HealthSyncTheme.primaryBlue
                 ) {
-                    TextField("https://api.example.com", text: $appState.settings.backendURL)
+                    TextField("https://api.example.com", text: backendURLField)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
-                        .disabled(appState.isSavingSettings)
+                        .disabled(destinationControlsDisabled)
                 }
 
                 SettingsInputRow(
-                    title: appState.hasStoredToken ? "Auth Token" : "Token Required",
+                    title: "Auth Token",
                     systemImage: "key.fill",
                     color: HealthSyncTheme.warningOrange
                 ) {
-                    SecureField(appState.hasStoredToken ? "New token (stored)" : "Auth token", text: $appState.authTokenDraft)
+                    SecureField(appState.hasCustomToken && backendURLField.wrappedValue == appState.settings.backendURL
+                                ? "New token (optional)" : "Token for this backend", text: $tokenDraft)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .disabled(appState.isSavingSettings)
+                        .disabled(destinationControlsDisabled)
                 }
 
                 HStack(spacing: 10) {
                     Button {
-                        Task { await appState.saveSettingsAndToken() }
+                        Task {
+                            if await appState.useOwnBackend(backendURL: backendURLField.wrappedValue, tokenDraft: tokenDraft) {
+                                backendURLDraft = nil
+                                tokenDraft = ""
+                            }
+                        }
                     } label: {
-                        Label("Save", systemImage: "square.and.arrow.down")
+                        Label(appState.isSavingSettings ? "Saving…" : "Save and Test", systemImage: "square.and.arrow.down")
                     }
                     .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: true))
-                    .disabled(appState.isSavingSettings)
+                    .disabled(destinationControlsDisabled)
 
-                    testConnectionButton("Test")
+                    testConnectionButton("Test", backendURL: backendURLField.wrappedValue, tokenDraft: tokenDraft)
                 }
             }
         }
     }
 
-    private func testConnectionButton(_ title: String) -> some View {
+    private func testConnectionButton(_ title: String, backendURL: String? = nil, tokenDraft: String = "") -> some View {
         Button {
-            Task { await appState.testConnection() }
+            Task { await appState.testConnection(backendURL: backendURL, tokenDraft: tokenDraft) }
         } label: {
             if appState.isTestingConnection {
                 HStack(spacing: 8) {
@@ -646,7 +663,7 @@ struct SettingsView: View {
             }
 
             Button {
-                Task { await appState.saveSettingsAndToken() }
+                Task { await appState.applySyncFrequency() }
             } label: {
                 Label("Apply frequency", systemImage: "clock.arrow.circlepath")
             }
@@ -687,12 +704,12 @@ struct SettingsView: View {
 
         return VStack(alignment: .leading, spacing: 12) {
             SettingsInfoBanner(
-                text: "Selected Apple Health data uploads to HealthSync-hosted storage and remains available through a private read-only endpoint.",
+                text: OnboardingDestinationCopy.hosted,
                 systemImage: "lock.shield.fill",
                 color: HealthSyncTheme.primaryBlue
             )
 
-            if let progressMessage = presentation.progressMessage {
+            if appState.isSavingSettings, let progressMessage = presentation.progressMessage {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
@@ -702,7 +719,7 @@ struct SettingsView: View {
                 }
             }
 
-            if let feedbackMessage = presentation.feedbackMessage {
+            if appState.settings.storageMode == .hostedHealthSync, let feedbackMessage = presentation.feedbackMessage {
                 SettingsInfoBanner(
                     text: feedbackMessage,
                     systemImage: presentation.feedbackKind == .error ? "exclamationmark.circle.fill" : "checkmark.circle.fill",
@@ -710,27 +727,40 @@ struct SettingsView: View {
                 )
             }
 
-            Button {
-                Task { await appState.createHostedStorage() }
-            } label: {
-                Label(presentation.createButtonTitle, systemImage: presentation.createButtonSystemImage)
+            if appState.settings.storageMode != .hostedHealthSync && appState.hasHostedIngestToken {
+                Button {
+                    isUseHostedStorageConfirmationPresented = true
+                } label: {
+                    Label("Use hosted storage", systemImage: "externaldrive.badge.checkmark")
+                }
+                .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: true))
+                .disabled(destinationControlsDisabled)
+                .accessibilityIdentifier("use-hosted-storage-button")
+            } else if !appState.hasHostedIngestToken || presentation.isCreateButtonDisabled {
+                Button {
+                    Task { await appState.createHostedStorage() }
+                } label: {
+                    Label(presentation.createButtonTitle, systemImage: presentation.createButtonSystemImage)
+                }
+                .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: true))
+                .disabled(destinationControlsDisabled || presentation.isCreateButtonDisabled || appState.hasHostedIngestToken)
+                .accessibilityIdentifier("create-hosted-storage-button")
             }
-            .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: true))
-            .disabled(presentation.isCreateButtonDisabled)
-            .accessibilityIdentifier("create-hosted-storage-button")
 
-            testConnectionButton("Test hosted connection")
-                .disabled((appState.isBusy && !appState.canStopSync) || !appState.hasStoredToken)
-                .accessibilityIdentifier("test-hosted-connection-button")
+            if appState.settings.storageMode == .hostedHealthSync {
+                testConnectionButton("Test hosted connection")
+                    .disabled((appState.isBusy && !appState.canStopSync) || !appState.hasHostedIngestToken)
+                    .accessibilityIdentifier("test-hosted-connection-button")
+            }
 
-            if presentation.showsResetButton {
+            if appState.settings.storageMode == .hostedHealthSync && presentation.showsResetButton {
                 Button(role: .destructive) {
                     isResetHostedStorageConfirmationPresented = true
                 } label: {
                     Label(presentation.resetButtonTitle, systemImage: "arrow.triangle.2.circlepath")
                 }
                 .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryRed, filled: false))
-                .disabled(presentation.isResetButtonDisabled)
+                .disabled(appState.isBusy || presentation.isResetButtonDisabled)
                 .accessibilityIdentifier("reset-hosted-storage-button")
             }
         }
@@ -769,12 +799,12 @@ struct SettingsView: View {
 
     private var hostedStoragePresentation: HostedStorageSetupPresentation {
         HostedStorageSetupPresentation(
-            isBusy: appState.isBusy,
+            isBusy: appState.isSavingSettings,
             backendURL: appState.settings.backendURL,
             lastError: appState.lastError,
             hostedAgentEndpoint: appState.settings.hostedAgentEndpoint,
             hostedAgentToken: appState.hostedAgentToken,
-            hasStoredUploadToken: appState.hasStoredToken
+            hasStoredUploadToken: appState.hasHostedIngestToken
         )
     }
 
@@ -796,6 +826,41 @@ struct SettingsView: View {
     private func openAppSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         openURL(url)
+    }
+}
+
+struct SettingsStorageModeMenu: View {
+    @ObservedObject var appState: AppState
+    @Binding var draft: StorageMode?
+
+    func select(_ mode: StorageMode) {
+        draft = mode
+    }
+
+    var body: some View {
+        Menu {
+            ForEach(StorageMode.allCases) { mode in
+                Button {
+                    select(mode)
+                } label: {
+                    HStack {
+                        Text(mode.label)
+                        if (draft ?? appState.settings.storageMode) == mode {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 32, height: 32)
+                .background(Color.primary.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .accessibilityLabel("Storage mode")
+        .accessibilityIdentifier("storage-mode-menu")
     }
 }
 
