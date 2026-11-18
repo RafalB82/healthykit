@@ -85,9 +85,7 @@ struct HealthSyncTheme {
     static let primaryBlue = Color(red: 0/255, green: 122/255, blue: 255/255)
     static let primaryCyan = Color(red: 50/255, green: 198/255, blue: 255/255)
     static let successGreen = Color(red: 52/255, green: 199/255, blue: 89/255)
-    static let successEmerald = Color(red: 46/255, green: 204/255, blue: 113/255)
     static let warningOrange = Color(red: 255/255, green: 149/255, blue: 0/255)
-    static let warningAmber = Color(red: 241/255, green: 196/255, blue: 15/255)
     
     // Sleek Gradients
     static var heartGradient: LinearGradient {
@@ -96,14 +94,6 @@ struct HealthSyncTheme {
     
     static var stepsGradient: LinearGradient {
         LinearGradient(colors: [primaryBlue, primaryCyan], startPoint: .topLeading, endPoint: .bottomTrailing)
-    }
-    
-    static var successGradient: LinearGradient {
-        LinearGradient(colors: [successGreen, successEmerald], startPoint: .topLeading, endPoint: .bottomTrailing)
-    }
-    
-    static var warningGradient: LinearGradient {
-        LinearGradient(colors: [warningOrange, warningAmber], startPoint: .topLeading, endPoint: .bottomTrailing)
     }
 
     static var disabledGradient: LinearGradient {
@@ -136,27 +126,6 @@ struct HealthSyncTheme {
         }
     }
     
-    struct InteractiveCardModifier: ViewModifier {
-        let padding: CGFloat
-        @State private var isPressed = false
-        
-        func body(content: Content) -> some View {
-            content
-                .padding(padding)
-                .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color(uiColor: .secondarySystemGroupedBackground))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color(uiColor: .separator).opacity(0.35), lineWidth: 0.5)
-                )
-                .shadow(color: Color.black.opacity(0.03), radius: 8, x: 0, y: 3)
-                .scaleEffect(isPressed ? 0.98 : 1.0)
-                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isPressed)
-        }
-    }
-    
     struct PrimaryButtonStyle: ButtonStyle {
         let isBusy: Bool
         let gradient: LinearGradient
@@ -182,10 +151,6 @@ struct HealthSyncTheme {
 extension View {
     func healthCardStyle(padding: CGFloat = 16) -> some View {
         modifier(HealthSyncTheme.CardModifier(padding: padding))
-    }
-    
-    func interactiveHealthCardStyle(padding: CGFloat = 16) -> some View {
-        modifier(HealthSyncTheme.InteractiveCardModifier(padding: padding))
     }
 }
 

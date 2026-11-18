@@ -1,17 +1,16 @@
-# HealthSync Persistent Backend
+# Self-hosted HealthSync API
 
-This backend stores HealthSync uploads in Postgres and exposes read APIs for synced metrics, workouts, and sync batches.
+This FastAPI service stores uploads in Postgres and exposes read APIs for metrics, workouts, and sync batches. It is separate from the [official hosted API](../cloudflare/README.md).
 
 For the public walkthroughs, see [server setup](https://healthysync.app/docs/self-hosting), [operations](https://healthysync.app/docs/operations), and [agent access](https://healthysync.app/docs/agent-access).
 
-The iOS app already sends the correct request shape:
+To implement your own receiver, see the [upload contract](UPLOAD_API.md).
 
-```text
-POST /api/apple-health/sync
-Authorization: Bearer <API_TOKEN>
-```
+## Local Docker Compose setup
 
-## Local Or Self-Hosted Setup
+> **Known limitation:** A fresh stock Postgres database cannot complete `alembic upgrade head`: migration `20260605_0004` expects the Supabase roles `anon`, `authenticated`, and `service_role`. The Compose API container runs this migration on startup. For a fresh persistent install, use the [managed Postgres setup](#managed-postgres-setup) with a compatible database. For local app development without persistence, use the [request stub](../backend_stub/README.md).
+
+Run from the repository root. You need Docker with Compose and Python 3.11+ for the token helper.
 
 1. Copy the environment template:
 
@@ -26,9 +25,9 @@ python3 -m backend.scripts.generate_token
 python3 -m backend.scripts.generate_token
 ```
 
-3. In `.env`, replace only these local Docker values: `POSTGRES_PASSWORD`, `API_TOKEN`, and `TOKEN_HASH_SECRET`. Paste the first token as `API_TOKEN`, paste the second token as `TOKEN_HASH_SECRET`, and set `POSTGRES_PASSWORD` to a local database password.
+3. In `.env`, set a URL-safe `POSTGRES_PASSWORD` and use the two generated values for `API_TOKEN` and `TOKEN_HASH_SECRET`, respectively. Keep `.env` out of version control.
 
-4. Start Postgres and the API:
+4. Start Postgres and the API (requires a migration-compatible database; see above):
 
 ```bash
 docker compose up --build
@@ -40,11 +39,11 @@ The API runs on:
 http://127.0.0.1:8080
 ```
 
-For an iOS simulator, enter `http://127.0.0.1:8080` in HealthSync settings. For a real iPhone, use an HTTPS URL reachable from the phone, or use your Mac's LAN address for same-Wi-Fi testing.
+Enter the base URL and `API_TOKEN` in HealthSync settings. For a real iPhone, use an HTTPS URL reachable from the phone, or use your Mac's LAN address for same-Wi-Fi testing.
 
-## Managed Postgres Setup
+## Managed Postgres setup
 
-Use this path for Supabase, Neon, or another hosted Postgres database.
+Use a Postgres database with the Supabase roles above and credentials with permission to apply the schema and default privilege grants. A Supabase database using its `postgres` role meets these requirements; a stock managed Postgres instance does not by default.
 
 1. Create a Postgres database with your provider.
 2. Copy the provider's Postgres connection string.
@@ -78,9 +77,9 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8080
 
 For production iPhone sync, deploy this API behind HTTPS and enter the deployed base URL plus `API_TOKEN` in HealthSync settings.
 
-## Hosted Supabase Mode
+## Optional workspace provisioning
 
-Use this path when HealthSync should provision separate hosted workspaces with app ingest tokens and private read-only agent tokens. User data is stored in Supabase Postgres through this FastAPI backend. Apps and agents never receive Supabase credentials.
+Enable this mode if your FastAPI deployment should issue workspace-scoped ingest tokens and read-only agent tokens. Apps and agents never receive database credentials.
 
 Set the hosted environment:
 

@@ -27,10 +27,9 @@ Open `http://localhost:3000`.
 
 ## Cloudflare Pages deployment
 
-The `healthysync` Pages project connects to `megabyte0x/healthykit` on GitHub and
-builds changes to `web/` on `main` automatically. Its root directory is `web`, build
-command is `npm run build`, and output directory is `out`. The canonical public URL
-is `https://healthysync.app`; `NEXT_PUBLIC_SITE_URL` can override it for local checks.
+The `healthysync` Pages project builds from `web/` with `npm run build` and
+serves the `out/` directory. The canonical public URL is `https://healthysync.app`;
+`NEXT_PUBLIC_SITE_URL` can override it for local checks.
 
 For a manual production deployment after authenticating with `npx wrangler login`:
 

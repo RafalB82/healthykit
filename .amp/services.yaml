@@ -5,4 +5,4 @@ services:
     portal:
       url: /
       title: HealthSync website
-      description: Public HealthSync site. Local TestFlight requests are stored only in this orb.
+      description: Local preview of the public HealthSync site and user guides.
