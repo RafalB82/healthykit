@@ -8,8 +8,6 @@ To implement your own receiver, see the [upload contract](UPLOAD_API.md).
 
 ## Local Docker Compose setup
 
-> **Known limitation:** A fresh stock Postgres database cannot complete `alembic upgrade head`: migration `20260605_0004` expects the Supabase roles `anon`, `authenticated`, and `service_role`. The Compose API container runs this migration on startup. For a fresh persistent install, use the [managed Postgres setup](#managed-postgres-setup) with a compatible database. For local app development without persistence, use the [request stub](../backend_stub/README.md).
-
 Run from the repository root. You need Docker with Compose and Python 3.11+ for the token helper.
 
 1. Copy the environment template:
@@ -27,23 +25,20 @@ python3 -m backend.scripts.generate_token
 
 3. In `.env`, set a URL-safe `POSTGRES_PASSWORD` and use the two generated values for `API_TOKEN` and `TOKEN_HASH_SECRET`, respectively. Keep `.env` out of version control.
 
-4. Start Postgres and the API (requires a migration-compatible database; see above):
+4. Start Postgres and the API. The API applies the database migrations on startup:
 
 ```bash
-docker compose up --build
+docker compose up --build -d
+curl --fail --retry 10 --retry-connrefused http://127.0.0.1:8080/health
 ```
 
-The API runs on:
+The health check should return `{"ok":true}`. If it does not, check `docker compose logs api db` for startup errors.
 
-```text
-http://127.0.0.1:8080
-```
-
-Enter the base URL and `API_TOKEN` in HealthSync settings. For a real iPhone, use an HTTPS URL reachable from the phone, or use your Mac's LAN address for same-Wi-Fi testing.
+Enter `http://127.0.0.1:8080` and `API_TOKEN` in HealthSync settings on the iOS simulator. For a real iPhone, use an HTTPS URL reachable from the phone, or use your Mac's LAN address for same-Wi-Fi testing.
 
 ## Managed Postgres setup
 
-Use a Postgres database with the Supabase roles above and credentials with permission to apply the schema and default privilege grants. A Supabase database using its `postgres` role meets these requirements; a stock managed Postgres instance does not by default.
+Use PostgreSQL 15 or later and a role that can create and migrate objects in the `public` schema. On Supabase, use the `postgres` role for migrations so the schema hardening can apply its grants and row-level security rules. Standard PostgreSQL does not need Supabase roles.
 
 1. Create a Postgres database with your provider.
 2. Copy the provider's Postgres connection string.

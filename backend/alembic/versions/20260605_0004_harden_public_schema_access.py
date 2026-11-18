@@ -16,33 +16,40 @@ def upgrade() -> None:
 
     op.execute(
         """
-        REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC, anon, authenticated;
-        REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon, authenticated;
-        REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, anon, authenticated;
-        REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, anon, authenticated;
-
-        GRANT USAGE ON SCHEMA public TO service_role;
-        GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO service_role;
-        GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO service_role;
-        GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO service_role;
-
-        ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-            REVOKE ALL ON TABLES FROM PUBLIC, anon, authenticated;
-        ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-            REVOKE ALL ON SEQUENCES FROM PUBLIC, anon, authenticated;
-        ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-            REVOKE ALL ON FUNCTIONS FROM PUBLIC, anon, authenticated;
-        ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-            GRANT ALL ON TABLES TO service_role;
-        ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-            GRANT ALL ON SEQUENCES TO service_role;
-        ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-            GRANT ALL ON FUNCTIONS TO service_role;
-
         DO $$
         DECLARE
             table_record record;
         BEGIN
+            -- Skip stock Postgres, but fail closed if Supabase roles are only partially configured.
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_roles WHERE rolname IN ('anon', 'authenticated', 'service_role')
+            ) THEN
+                RETURN;
+            END IF;
+
+            REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC, anon, authenticated;
+            REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon, authenticated;
+            REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, anon, authenticated;
+            REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, anon, authenticated;
+
+            GRANT USAGE ON SCHEMA public TO service_role;
+            GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO service_role;
+            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO service_role;
+            GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO service_role;
+
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+                REVOKE ALL ON TABLES FROM PUBLIC, anon, authenticated;
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+                REVOKE ALL ON SEQUENCES FROM PUBLIC, anon, authenticated;
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+                REVOKE ALL ON FUNCTIONS FROM PUBLIC, anon, authenticated;
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+                GRANT ALL ON TABLES TO service_role;
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+                GRANT ALL ON SEQUENCES TO service_role;
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+                GRANT ALL ON FUNCTIONS TO service_role;
+
             FOR table_record IN
                 SELECT schemaname, tablename
                 FROM pg_tables

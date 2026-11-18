@@ -127,11 +127,8 @@ install_python() {
   source .venv/bin/activate
   python -m pip install --upgrade pip
   python -m pip install -r backend/requirements.txt -r backend_stub/requirements.txt
-  # 20260605_0004 grants to Supabase roles (anon, authenticated, service_role)
-  # that a plain local cluster does not have. Later revisions depend on it, so
-  # local orbs stop at the last revision that applies to stock Postgres.
   DATABASE_URL="postgresql+psycopg://healthsync:${local_password}@127.0.0.1:15432/healthsync" \
-    .venv/bin/alembic upgrade 20260531_0003
+    .venv/bin/alembic upgrade head
 }
 
 install_web() {
@@ -164,7 +161,7 @@ if ! grep -Fqx "$marker" "$guidance" 2>/dev/null; then
 - Python backend deps live in the repo-root `.venv`. Activate with `source .venv/bin/activate`, or call `.venv/bin/pytest` and `.venv/bin/alembic` directly.
 - Backend tests use SQLite and do not need Postgres: `.venv/bin/python -m pytest Tests/backend/test_backend_api.py -q`
 - Local Postgres listens on 127.0.0.1:15432 (user/db `healthsync`, password `healthsync-orb`). `.env` holds matching `DATABASE_URL`, `API_TOKEN`, and `TOKEN_HASH_SECRET` for local development only.
-- Local Alembic stops at `20260531_0003`. Revision `20260605_0004` requires Supabase roles and fails on this plain Postgres. Use a Supabase `DATABASE_URL` before running `alembic upgrade head`.
+- Orb setup migrates the local Postgres database to Alembic head.
 - The Next.js site is installed under `web/`. Start it with `amp orb services ensure` (declared in `.amp/services.yaml`), not from setup.
 - iOS builds need Xcode and do not run on Linux orbs. `xcodebuild` is unavailable here.
 - Docker is installed but the daemon is not running. Prefer the local Postgres above; do not start dockerd from setup.
