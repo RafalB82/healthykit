@@ -18,6 +18,8 @@ there includes it in navigation, the sitemap, and `llms.txt`.
 
 ## Run locally
 
+Use Node.js 22.12 or later for Wrangler.
+
 ```bash
 npm ci
 npm run dev

@@ -4,7 +4,7 @@
 
 ## Development
 
-Run from the repository root. The Worker uses the pinned Wrangler and TypeScript dependencies in `web/`.
+Run from the repository root with Node.js 22.12 or later. The Worker uses the pinned Wrangler and TypeScript dependencies in `web/`.
 
 ```bash
 npm ci --prefix web
