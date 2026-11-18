@@ -20,7 +20,7 @@ struct OnboardingHealthDataView: View {
                         Text("Choose Health data")
                             .font(.title.weight(.bold))
 
-                        Text("HealthSync asks Apple Health only for the types you pick. You can change this later in Settings.")
+                        Text("HealthSync asks Apple Health to read the types you pick. Workouts also asks for related heart rate, energy, and distance types. You can change this later in Settings.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

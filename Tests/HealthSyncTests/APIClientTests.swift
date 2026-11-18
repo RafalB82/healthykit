@@ -796,6 +796,32 @@ final class HealthKitManagerErrorTests: XCTestCase {
             "Health permissions are not set up yet. Tap Continue and review the requested read permissions."
         )
     }
+
+    func testRequestingEmptySelectionThrowsWithoutCallingHealthKit() async {
+        final class AuthorizationSpyStore: HKHealthStore, @unchecked Sendable {
+            var requestCount = 0
+            override func requestAuthorization(
+                toShare typesToShare: Set<HKSampleType>?, read typesToRead: Set<HKObjectType>?,
+                completion: @escaping (Bool, Error?) -> Void
+            ) {
+                requestCount += 1
+                completion(true, nil)
+            }
+        }
+        let store = AuthorizationSpyStore()
+        let manager = HealthKitManager(healthStore: store)
+
+        do {
+            try await manager.requestReadPermissions(for: [])
+            XCTFail("Expected an empty selection to be rejected")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Select at least one Health data type first.")
+        }
+        XCTAssertEqual(store.requestCount, 0)
+
+        try? await manager.requestReadPermissions(for: [.stepCount])
+        XCTAssertEqual(store.requestCount, 1)
+    }
 }
 
 final class HealthPermissionPromptPresentationTests: XCTestCase {

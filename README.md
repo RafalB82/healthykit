@@ -16,7 +16,7 @@ Support: https://healthysync.app/support
 
 ## What It Syncs
 
-HealthSync reads only the Apple Health data types you select. It supports 189 types across 11 categories (activity, heart, body, sleep, nutrition, and more).
+HealthSync asks Apple Health to read the data types you select; Workouts also asks for related heart rate, energy, and distance types. It supports 189 types across 11 categories (activity, heart, body, sleep, nutrition, and more).
 
 Fresh installs start with the **Core** set:
 
@@ -27,7 +27,7 @@ Fresh installs start with the **Core** set:
 - Heart rate
 - Active energy
 
-Onboarding lets you review the selection before iOS asks for Health access, using the Core, Fitness (Core plus all activity, heart fitness, and body composition types), or Everything presets, or by choosing types in each category. Settings → Health Data offers All, None, and Core shortcuts plus the same per-category lists. Updating the app never changes a selection you already saved.
+Onboarding lets you review the selection before iOS asks for Health access, using the Core, Fitness (Core plus all activity, heart fitness, and body composition types), or Everything presets, or by choosing types in each category. Settings → Health Data offers All, None, and Core shortcuts plus the same per-category lists; tap Save selection there to keep changes and allow Health access for newly added types. Updating the app never changes a selection you already saved.
 
 The app requests read-only HealthKit permissions. It does not request write permissions, does not include analytics, and does not use third-party telemetry or health SDKs.
 

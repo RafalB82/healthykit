@@ -49,6 +49,7 @@ enum HealthKitManagerError: LocalizedError {
     case unsupportedType(HealthDataType)
     case statisticsUnavailable(HealthDataType)
     case missingAnchor
+    case noDataTypesSelected
 
     var errorDescription: String? {
         switch self {
@@ -62,6 +63,8 @@ enum HealthKitManagerError: LocalizedError {
             "HealthKit statistics are not available: \(type.label)."
         case .missingAnchor:
             "HealthKit did not return an incremental sync anchor."
+        case .noDataTypesSelected:
+            "Select at least one Health data type first."
         }
     }
 
@@ -126,10 +129,14 @@ final class HealthKitManager: HealthKitSyncReading {
     }
 
     func requestReadPermissions(for selectedTypes: Set<HealthDataType>) async throws {
+        let readTypes = HealthKitTypeRegistry.readTypes(for: selectedTypes)
+        // HealthKit raises an uncatchable NSInvalidArgumentException for an empty request.
+        guard !readTypes.isEmpty else {
+            throw HealthKitManagerError.noDataTypesSelected
+        }
         guard isHealthDataAvailable else {
             throw HealthKitManagerError.healthDataUnavailable
         }
-        let readTypes = HealthKitTypeRegistry.readTypes(for: selectedTypes)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             healthStore.requestAuthorization(toShare: [], read: readTypes) { success, error in
                 if let error {

@@ -423,7 +423,7 @@ struct SettingsView: View {
                 Label(presentation.approvalButtonTitle, systemImage: presentation.approvalButtonSystemImage)
             }
             .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryRed, filled: true))
-            .disabled(presentation.isApprovalButtonDisabled)
+            .disabled(presentation.isApprovalButtonDisabled || appState.settings.selectedTypes.isEmpty)
             .accessibilityIdentifier("request-apple-health-approval-button")
 
             if presentation.showsSettingsButton {
@@ -533,10 +533,19 @@ struct SettingsView: View {
                 .accessibilityIdentifier("health-data-reset-core-button")
             }
 
-            Text("Core: \(HealthDataPreset.core.summary.lowercased()).")
+            Text("Core: \(HealthDataPreset.core.summary.lowercased()). After changing types here or in a category, tap Save selection to keep them and allow Health access for new types.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                Task { await appState.connectAppleHealth() }
+            } label: {
+                Label("Save selection", systemImage: "square.and.arrow.down")
+            }
+            .buttonStyle(SettingsActionButtonStyle(color: HealthSyncTheme.primaryBlue, filled: true))
+            .disabled(appState.isBusy || selectedTypes.isEmpty)
+            .accessibilityIdentifier("health-data-save-selection-button")
 
             SettingsDivider()
 
