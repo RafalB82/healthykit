@@ -33,6 +33,27 @@ struct DashboardView: View {
         GridItem(.flexible(), spacing: 16)
     ]
 
+    private var initialImportCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("First Apple Health Sync")
+                .font(.headline)
+            Text("Your first sync may take a while. Keep HealthSync open to keep your screen on until it finishes.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Button {
+                Task { await appState.startInitialImport() }
+            } label: {
+                Label("Keep Screen On & Sync", systemImage: "tray.and.arrow.up.fill")
+            }
+            .buttonStyle(HealthSyncTheme.PrimaryButtonStyle(
+                isBusy: appState.isBusy,
+                gradient: appState.isBusy ? HealthSyncTheme.disabledGradient : HealthSyncTheme.stepsGradient
+            ))
+            .disabled(appState.isBusy)
+        }
+        .healthCardStyle(padding: 16)
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -62,7 +83,7 @@ struct DashboardView: View {
                         }
                         .padding(.horizontal, 4)
 
-                        if appState.canStopSync {
+                        if appState.canStopSync && appState.foregroundSync == nil {
                             VStack(alignment: .leading, spacing: 12) {
                                 HStack(spacing: 10) {
                                     ProgressView()
@@ -107,6 +128,10 @@ struct DashboardView: View {
 
                         if let feedback = appState.actionFeedback {
                             HealthActionFeedbackBanner(feedback: feedback)
+                        }
+
+                        if appState.shouldOfferInitialImport && appState.foregroundSync != .initialImport {
+                            initialImportCard
                         }
                         
                         LazyVGrid(columns: columns, spacing: 16) {

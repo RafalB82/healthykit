@@ -165,7 +165,10 @@ actor IncrementalSyncRunner {
         self.engine = SyncEngine(store: store, uploader: uploader)
     }
 
-    func run(types: Set<HealthDataType>, configuration: UploadConfiguration, now: Date = Date(), calendar: Calendar = .current) async throws {
+    func run(
+        types: Set<HealthDataType>, configuration: UploadConfiguration, now: Date = Date(), calendar: Calendar = .current,
+        isInitialImport: Bool = false, onProgress: (@MainActor @Sendable (Double) -> Void)? = nil
+    ) async throws {
         try Task.checkCancellation()
         try await store.splitOversizedPendingBatches(maxRecords: 100)
         var anchors: [HealthDataType: String] = [:]
@@ -189,7 +192,15 @@ actor IncrementalSyncRunner {
         for (type, anchor) in result.anchors {
             try await store.saveAnchor(anchor, for: type)
         }
-        try await uploadNewBatches(batches, configuration: configuration, now: now)
+        let uploads = isInitialImport
+            ? try await store.pendingBatches().filter { $0.destination == configuration.destination }
+            : batches
+        // Local staging and recent-data reconciliation each count as one step.
+        let totalSteps = Double(uploads.count + 2)
+        await onProgress?(1 / totalSteps)
+        try await uploadNewBatches(uploads, configuration: configuration, now: now) { completed in
+            await onProgress?(Double(completed + 1) / totalSteps)
+        }
 
         let recentTypes = types.intersection([.stepCount, .sleepAnalysis, .workouts])
         if !recentTypes.isEmpty,
@@ -208,6 +219,15 @@ actor IncrementalSyncRunner {
                 range: SyncDateRange(start: start, end: now), timezone: calendar.timeZone.identifier)
             try await uploadNewBatches(recentBatches, configuration: configuration, now: now)
         }
+        if !isInitialImport {
+            try await retryPending(configuration: configuration, now: now)
+        }
+        await onProgress?(1)
+    }
+
+    func retryPendingUploads(configuration: UploadConfiguration, now: Date = Date()) async throws {
+        try Task.checkCancellation()
+        try await store.splitOversizedPendingBatches(maxRecords: 100)
         try await retryPending(configuration: configuration, now: now)
     }
 
@@ -230,10 +250,14 @@ actor IncrementalSyncRunner {
         return batches
     }
 
-    private func uploadNewBatches(_ batches: [SyncBatch], configuration: UploadConfiguration, now: Date) async throws {
+    private func uploadNewBatches(
+        _ batches: [SyncBatch], configuration: UploadConfiguration, now: Date,
+        didUpload: ((Int) async -> Void)? = nil
+    ) async throws {
         do {
-            for batch in batches {
+            for (index, batch) in batches.enumerated() {
                 try await upload([batch], configuration: configuration, now: now)
+                await didUpload?(index + 1)
             }
         } catch {
             try Task.checkCancellation()

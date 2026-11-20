@@ -182,10 +182,12 @@ final class HealthKitManager: HealthKitSyncReading {
     // Anchors are local to this range, not the ordinary incremental-sync cursor.
     func forEachBackfillBatch(
         types: Set<HealthDataType>, start: Date, end: Date, mode: BackfillDataMode,
+        onTypesCompleted: (@MainActor @Sendable (Int) -> Void)? = nil,
         consume: (HealthKitFetchResult) async throws -> Void
     ) async throws {
         guard isHealthDataAvailable else { throw HealthKitManagerError.healthDataUnavailable }
-        for type in types.sorted(by: { $0.rawValue < $1.rawValue }) {
+        for (index, type) in types.sorted(by: { $0.rawValue < $1.rawValue }).enumerated() {
+            if index > 0 { await onTypesCompleted?(index) }
             try Task.checkCancellation()
             guard let sampleType = HealthKitTypeRegistry.sampleType(for: type) else { continue }
             if mode == .rawSamples && (type == .oxygenSaturation || type == .hrvSDNN) {
@@ -240,6 +242,7 @@ final class HealthKitManager: HealthKitSyncReading {
             }
             if !result.isEmpty { try await consume(result) }
         }
+        await onTypesCompleted?(types.count)
     }
 
     private func backfillPage(type: HKSampleType, predicate: NSPredicate, anchor: HKQueryAnchor?, limit: Int) async throws -> BackfillPage {

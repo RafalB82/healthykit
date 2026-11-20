@@ -613,6 +613,70 @@ final class IncrementalMaintenanceTests: XCTestCase {
         XCTAssertEqual(payloads.flatMap(\.metrics).map(\.value), [999])
     }
 
+    @MainActor
+    func testInitialImportReportsProgressAsBatchesAreAcknowledged() async throws {
+        let store = try SQLiteLocalStore(url: databaseURL())
+        let reader = MaintenanceHealthReader(incremental: HealthKitIncrementalResult(
+            fetchResult: samples(150), anchors: [.heartRate: "saved-anchor"], deletions: []))
+        let uploader = MaintenanceUploader()
+        var progress: [Double] = []
+        try await IncrementalSyncRunner(store: store, reader: reader, uploader: uploader)
+            .run(types: [.heartRate], configuration: configuration, now: now, calendar: calendar) {
+                progress.append($0)
+            }
+
+        XCTAssertEqual(progress, [0.25, 0.5, 0.75, 1])
+        let payloads = await uploader.payloads
+        XCTAssertEqual(payloads.map(\.metrics.count), [100, 50])
+    }
+
+    func testInitialImportRetryDrainsEveryQueuedBatch() async throws {
+        let url = databaseURL()
+        let store = try SQLiteLocalStore(url: url)
+        let reader = MaintenanceHealthReader(incremental: HealthKitIncrementalResult(
+            fetchResult: samples(450), anchors: [.heartRate: "saved-anchor"], deletions: []))
+        do {
+            try await IncrementalSyncRunner(store: store, reader: reader, uploader: MaintenanceUploader(fails: true))
+                .run(types: [.heartRate], configuration: configuration, now: now, calendar: calendar, isInitialImport: true)
+            XCTFail("An unacknowledged import must fail")
+        } catch {}
+
+        let foreign = SyncBatch(
+            payload: .empty(deviceID: configuration.deviceID, dateRange: SyncDateRange(start: now, end: now), timezone: "UTC"),
+            destination: "https://other.example"
+        )
+        try await store.enqueueBatch(foreign)
+        let reopened = try SQLiteLocalStore(url: url)
+        let retry = MaintenanceHealthReader()
+        let uploader = MaintenanceUploader()
+        try await IncrementalSyncRunner(store: reopened, reader: retry, uploader: uploader)
+            .run(types: [.heartRate], configuration: configuration, now: now, calendar: calendar, isInitialImport: true)
+
+        let pending = try await reopened.pendingBatches()
+        let acknowledged = await uploader.payloads
+        XCTAssertEqual(pending.map(\.id), [foreign.id])
+        XCTAssertEqual(acknowledged.flatMap(\.metrics).count, 450)
+    }
+
+    func testPendingOnlyRetrySplitsLegacyBatchesWithoutReadingHealthKit() async throws {
+        let store = try SQLiteLocalStore(url: databaseURL())
+        let legacyPayload = try HealthNormalizer().payload(
+            deviceID: configuration.deviceID, dateRange: SyncDateRange(start: now, end: now), timezone: "UTC",
+            quantitySamples: samples(205).quantitySamples, sleepSamples: [], workoutSamples: []
+        )
+        try await store.enqueueBatch(SyncBatch(payload: legacyPayload, destination: configuration.destination))
+        let reader = MaintenanceHealthReader()
+        let uploader = MaintenanceUploader()
+        let runner = IncrementalSyncRunner(store: store, reader: reader, uploader: uploader)
+
+        try await runner.retryPendingUploads(configuration: configuration, now: now)
+
+        let payloads = await uploader.payloads
+        let reads = await reader.receivedAnchors
+        XCTAssertEqual(payloads.map(\.metrics.count), [100, 100, 5])
+        XCTAssertTrue(reads.isEmpty)
+    }
+
     func testFreshIncrementalIsChunkedBeforeStaleRetryAndAnchorsSurviveRestart() async throws {
         let url = databaseURL()
         let store = try SQLiteLocalStore(url: url)
@@ -1033,6 +1097,24 @@ final class StorageOptInAppStateTests: XCTestCase {
         XCTAssertEqual(appState.status.pendingUploadCount, 0)
         XCTAssertEqual(appState.actionFeedback?.message, "Pending uploads completed.")
         XCTAssertFalse(appState.settings.hasRequestedHealthPermissions)
+    }
+
+    func testFirstHistoryReadWaitsForConfirmationAfterStorageAndPermissions() async throws {
+        let url = databaseURL()
+        let store = try SQLiteLocalStore(url: url)
+        var settings = syncReadySettings(mode: .customBackend, backendURL: "https://mine.example")
+        settings.selectedTypes = [.stepCount]
+        try await store.saveSettings(settings)
+        let keychain = MemoryKeychain()
+        keychain.tokens[customTokenID] = "confirmed-token"
+        let appState = makeAppState(databaseURL: url, keychain: keychain)
+        await appState.bootstrap()
+        await appState.sceneDidBecomeActive()
+
+        XCTAssertTrue(appState.shouldOfferInitialImport)
+        let ranAutomatically = await appState.syncIncremental()
+        XCTAssertFalse(ranAutomatically)
+        XCTAssertTrue(NetworkRecordingURLProtocol.requests.isEmpty)
     }
 
     func testAutomaticSyncDoesNotStartWithoutDestinationEvenWithHealthAccess() async throws {

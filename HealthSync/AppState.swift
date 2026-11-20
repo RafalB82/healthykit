@@ -1,6 +1,7 @@
 import Foundation
 import BackgroundTasks
 import SwiftUI
+import UIKit
 
 @MainActor
 struct BackgroundSyncScheduler {
@@ -147,6 +148,11 @@ enum BackfillSync {
     }
 }
 
+enum ForegroundSyncKind {
+    case historical
+    case initialImport
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var shouldShowOnboarding = true
@@ -159,6 +165,9 @@ final class AppState: ObservableObject {
     @Published var isBusy = false
     @Published var backfillProgress = 0.0
     @Published var backfillError: String?
+    @Published private(set) var foregroundSync: ForegroundSyncKind?
+    @Published private(set) var initialImportProgress = 0.0
+    @Published private(set) var needsInitialImport = true
     @Published var lastError: String?
     @Published var actionFeedback: HealthActionFeedback?
     @Published private(set) var backendFeedback: HealthActionFeedback?
@@ -184,11 +193,34 @@ final class AppState: ObservableObject {
     private var bootstrapTask: Task<Void, Never>?
     private var pendingIncrementalWaiters: [CheckedContinuation<Bool, Never>] = []
     private let apiSession: URLSession
+    private let setIdleTimerDisabled: @MainActor (Bool) -> Void
+    private var scenePhase: ScenePhase = .inactive
+    private var keepsScreenAwake = false
 
-    init(storeURL: URL? = nil, keychain: any TokenProviding = KeychainStore(), apiSession: URLSession = .shared) {
+    init(
+        storeURL: URL? = nil, keychain: any TokenProviding = KeychainStore(), apiSession: URLSession = .shared,
+        setIdleTimerDisabled: @escaping @MainActor (Bool) -> Void = { UIApplication.shared.isIdleTimerDisabled = $0 }
+    ) {
         self.storeURL = storeURL
         self.keychain = keychain
         self.apiSession = apiSession
+        self.setIdleTimerDisabled = setIdleTimerDisabled
+    }
+
+    var shouldOfferInitialImport: Bool {
+        needsInitialImport && settings.hasRequestedHealthPermissions && !approvedTypes.isEmpty && hasChosenStorageDestination
+    }
+
+    func setScenePhase(_ phase: ScenePhase) {
+        scenePhase = phase
+        updateIdleTimer()
+    }
+
+    private func updateIdleTimer() {
+        let shouldKeepScreenAwake = foregroundSync != nil && scenePhase == .active
+        guard shouldKeepScreenAwake != keepsScreenAwake else { return }
+        keepsScreenAwake = shouldKeepScreenAwake
+        setIdleTimerDisabled(shouldKeepScreenAwake)
     }
 
     func bootstrap() async {
@@ -215,6 +247,7 @@ final class AppState: ObservableObject {
             )
             settings = try await localStore.loadSettings()
             approvedTypes = settings.selectedTypes
+            needsInitialImport = try await localStore.requiresInitialImport()
             hasStoredToken = try DevelopmentKeychainBypass.hasStoredToken {
                 try hasTokenForCurrentStorageMode()
             }
@@ -251,7 +284,6 @@ final class AppState: ObservableObject {
 
     func connectAppleHealth() async {
         guard !isSavingSettings else { return }
-        var completedInitialSetup = false
         await runBusy { [self] in
             guard settings.storageMode != nil else { throw APIClientError.noStorageDestination }
             let types = settings.selectedTypes
@@ -260,9 +292,7 @@ final class AppState: ObservableObject {
             } else {
                 try await healthKit.requestReadPermissions(for: types)
             }
-            let isInitialSetup = !settings.hasRequestedHealthPermissions
             try await saveHealthSelection(types)
-            completedInitialSetup = isInitialSetup
             shouldShowOnboarding = false
             permissionSummary = "Requested"
             actionFeedback = types.isEmpty
@@ -271,9 +301,6 @@ final class AppState: ObservableObject {
             await startObserversIfPossible()
             restartPeriodicSync()
             await refresh()
-        }
-        if completedInitialSetup && !isBusy && !Task.isCancelled {
-            await syncAutomatically()
         }
     }
 
@@ -538,9 +565,11 @@ final class AppState: ObservableObject {
 
     func backfill(start: Date, end: Date, mode: BackfillDataMode = .dailySummary) async {
         guard end > start else { return }
-        backfillProgress = 0
-        backfillError = nil
-        await runBusy(stoppable: true) { [self] in
+        await runBusy(stoppable: true, foregroundSync: .historical) { [self] in
+            backfillProgress = 0
+            backfillError = nil
+            let types = approvedTypes
+            let typesPerChunk = Double(max(1, types.count))
             let chunks = BackfillSync.chunks(start: start, end: end)
             let total = Double(chunks.count)
             var uploadedAny = false
@@ -551,7 +580,10 @@ final class AppState: ObservableObject {
                     try await ensureHealthPermissionsRequested()
                     let deviceID = try await store.deviceID()
                     try await healthKit.forEachBackfillBatch(
-                        types: approvedTypes, start: chunk.start, end: chunk.end, mode: mode
+                        types: types, start: chunk.start, end: chunk.end, mode: mode,
+                        onTypesCompleted: { [weak self] count in
+                            self?.backfillProgress = (Double(index) + Double(count) / typesPerChunk) / total
+                        }
                     ) { fetchResult in
                         let uploaded = try await self.uploadFetchResult(
                             fetchResult, deviceID: deviceID, start: chunk.start, end: chunk.end,
@@ -570,8 +602,26 @@ final class AppState: ObservableObject {
             if !uploadedAny {
                 try await store?.appendLog(SyncLogEntry(level: .info, message: HealthSyncUserMessages.noSamplesFoundForDateRange))
             }
+            try Task.checkCancellation()
             backfillProgress = 1
             await refresh()
+        }
+    }
+
+    func startInitialImport() async {
+        guard shouldOfferInitialImport else { return }
+        await runBusy(stoppable: true, foregroundSync: .initialImport) { [self] in
+            initialImportProgress = 0
+            guard let store else { throw APIClientError.invalidResponse }
+            try Task.checkCancellation()
+            try await store.setInitialImportCompleted(false)
+            try await syncIncrementalThrowing(isInitialImport: true) { [weak self] progress in
+                self?.initialImportProgress = progress
+            }
+            try Task.checkCancellation()
+            try await store.setInitialImportCompleted(true)
+            needsInitialImport = false
+            actionFeedback = HealthActionFeedback(kind: .success, message: "Initial sync finished.")
         }
     }
 
@@ -586,7 +636,14 @@ final class AppState: ObservableObject {
 
         var succeeded = false
         await runBusy(stoppable: true) { [self] in
-            try await syncIncrementalThrowing()
+            if needsInitialImport {
+                guard let incrementalSyncRunner else { throw APIClientError.invalidResponse }
+                let configuration = try await uploadConfiguration()
+                guard status.pendingUploadCount > 0 else { return }
+                try await incrementalSyncRunner.retryPendingUploads(configuration: configuration)
+            } else {
+                try await syncIncrementalThrowing()
+            }
             succeeded = true
         }
         return succeeded
@@ -677,16 +734,20 @@ final class AppState: ObservableObject {
     }
 
     private func syncAutomatically() async {
-        guard canRunAutomaticSync else { return }
+        guard canRunAutomaticSync, !needsInitialImport || status.pendingUploadCount > 0 else { return }
         _ = await syncIncremental()
     }
 
-    private func syncIncrementalThrowing() async throws {
+    private func syncIncrementalThrowing(
+        isInitialImport: Bool = false, onProgress: (@MainActor @Sendable (Double) -> Void)? = nil
+    ) async throws {
         guard let incrementalSyncRunner else { throw APIClientError.invalidResponse }
         try Task.checkCancellation()
         let configuration = try await uploadConfiguration()
         try await ensureHealthPermissionsRequested()
-        try await incrementalSyncRunner.run(types: approvedTypes, configuration: configuration)
+        try await incrementalSyncRunner.run(
+            types: approvedTypes, configuration: configuration, isInitialImport: isInitialImport, onProgress: onProgress
+        )
         await refresh()
     }
 
@@ -853,9 +914,14 @@ final class AppState: ObservableObject {
     /// Runs `operation` as the busy operation in a stored task so `stopSync()` can cancel it.
     /// Cancelling the calling task (for example, at background task expiry) cancels it quietly.
     /// `stoppable` marks a sync or backfill that the user can stop.
-    private func runBusy(stoppable: Bool = false, _ operation: @escaping @MainActor () async throws -> Void) async {
+    private func runBusy(
+        stoppable: Bool = false, foregroundSync: ForegroundSyncKind? = nil,
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) async {
         guard !isSavingSettings, BusyOperation.canStart(isBusy: isBusy) else { return }
         isBusy = true
+        self.foregroundSync = foregroundSync
+        updateIdleTimer()
         canStopSync = stoppable
         lastError = nil
         actionFeedback = nil
@@ -877,6 +943,8 @@ final class AppState: ObservableObject {
             let shouldRerun = BusyOperation.shouldRerunPendingSync(
                 hasWaiters: !waiters.isEmpty, stopRequested: isStoppingSync
             )
+            foregroundSync = nil
+            updateIdleTimer()
             isBusy = false
             busyOperation = nil
             canStopSync = false

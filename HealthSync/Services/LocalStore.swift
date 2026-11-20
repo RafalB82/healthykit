@@ -115,6 +115,22 @@ actor SQLiteLocalStore: BatchPersisting {
         try selectAnchor(type.rawValue)
     }
 
+    func requiresInitialImport() throws -> Bool {
+        if let completed = try selectSetting("initial_import_completed") {
+            return completed != "1"
+        }
+        let statement = try prepare("SELECT EXISTS(SELECT 1 FROM anchors)")
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw SQLiteStoreError.statementFailed(Self.message(from: db))
+        }
+        return sqlite3_column_int(statement, 0) == 0
+    }
+
+    func setInitialImportCompleted(_ completed: Bool) throws {
+        try upsertSetting(key: "initial_import_completed", value: completed ? "1" : "0")
+    }
+
     func saveAnchor(_ anchor: String, for type: HealthDataType) async throws {
         try upsertAnchor(key: type.rawValue, value: anchor)
     }

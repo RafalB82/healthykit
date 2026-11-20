@@ -6,6 +6,8 @@ struct BackfillView: View {
     @State private var endDate = Date()
     @State private var dataMode: BackfillDataMode = .dailySummary
 
+    private var isBackfilling: Bool { appState.foregroundSync == .historical }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
@@ -58,40 +60,16 @@ struct BackfillView: View {
                         DatePicker("End Date", selection: $endDate, displayedComponents: [.date, .hourAndMinute])
                             .font(.subheadline.weight(.medium))
                     }
+                    .disabled(isBackfilling)
                 }
                 .healthCardStyle(padding: 16)
                 
-                // Progress / Action Card
+                // Sync actions
                 VStack(spacing: 16) {
                     let isInvalidRange = endDate <= startDate
                     
                     if appState.actionFeedback == .syncStopped && !appState.isBusy {
                         HealthActionFeedbackBanner(feedback: .syncStopped)
-                    } else if appState.backfillProgress > 0 && appState.isBusy {
-                        VStack(spacing: 12) {
-                            HStack {
-                                Text("Backfill in progress...")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.primary)
-                                Spacer()
-                                Text("\(Int(appState.backfillProgress * 100))%")
-                                    .font(.subheadline.weight(.bold).monospaced())
-                                    .foregroundStyle(HealthSyncTheme.primaryBlue)
-                            }
-                            
-                            ProgressView(value: appState.backfillProgress)
-                                .tint(HealthSyncTheme.stepsGradient)
-                                .scaleEffect(x: 1, y: 1.5, anchor: .center)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                            
-                            HStack(spacing: 6) {
-                                PulsingDot(color: HealthSyncTheme.primaryBlue)
-                                Text("Uploading selected data...")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 8)
                     } else if let backfillError = appState.backfillError, !appState.isBusy {
                         HStack(spacing: 12) {
                             ZStack {
@@ -149,36 +127,35 @@ struct BackfillView: View {
                         )
                     }
                     
-                    Button {
-                        Task { await appState.backfill(start: startDate, end: endDate, mode: dataMode) }
-                    } label: {
-                        HStack {
-                            if appState.isBusy {
-                                ProgressView()
-                                    .tint(.white)
-                            } else {
-                                Image(systemName: "tray.and.arrow.up.fill")
-                                Text("Sync Selected Range")
-                            }
-                        }
-                    }
-                    .buttonStyle(HealthSyncTheme.PrimaryButtonStyle(
-                        isBusy: appState.isBusy,
-                        gradient: isInvalidRange || appState.isBusy ? HealthSyncTheme.disabledGradient : HealthSyncTheme.heartGradient
-                    ))
-                    .disabled(isInvalidRange || appState.isBusy)
+                    if !isBackfilling {
+                        Text("Keep HealthSync open while it syncs. Your screen will stay on until the sync finishes.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
-                    if appState.canStopSync {
+                        Button {
+                            Task { await appState.backfill(start: startDate, end: endDate, mode: dataMode) }
+                        } label: {
+                            Label("Keep Screen On & Sync", systemImage: "tray.and.arrow.up.fill")
+                        }
+                        .buttonStyle(HealthSyncTheme.PrimaryButtonStyle(
+                            isBusy: appState.isBusy,
+                            gradient: isInvalidRange || appState.isBusy ? HealthSyncTheme.disabledGradient : HealthSyncTheme.heartGradient
+                        ))
+                        .disabled(isInvalidRange || appState.isBusy)
+                    }
+
+                    if appState.canStopSync && appState.foregroundSync == nil {
                         StopSyncButton()
                     }
-                    
+
                     if isInvalidRange {
                         Text("End date must be strictly after start date")
                             .font(.caption)
                             .foregroundStyle(HealthSyncTheme.primaryRed)
                     }
                 }
-                .healthCardStyle(padding: 16)
+                .healthCardStyle(padding: isBackfilling ? 0 : 16)
                 
                 Spacer()
             }

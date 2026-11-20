@@ -1,6 +1,35 @@
 import XCTest
 import HealthKit
+import SwiftUI
 @testable import HealthSync
+
+final class ForegroundSyncTests: XCTestCase {
+    @MainActor
+    func testBackfillKeepsScreenAwakeAndRestoresItAfterFailure() async {
+        var idleTimerChanges: [Bool] = []
+        let state = AppState(setIdleTimerDisabled: { idleTimerChanges.append($0) })
+        state.settings.storageMode = .customBackend
+        state.setScenePhase(.active)
+
+        await state.backfill(start: Date(timeIntervalSince1970: 1), end: Date(timeIntervalSince1970: 2))
+
+        XCTAssertNotNil(state.backfillError)
+        XCTAssertEqual(idleTimerChanges, [true, false])
+        XCTAssertNil(state.foregroundSync)
+    }
+
+    @MainActor
+    func testBackgroundBackfillLeavesIdleTimerAlone() async {
+        var idleTimerChanges: [Bool] = []
+        let state = AppState(setIdleTimerDisabled: { idleTimerChanges.append($0) })
+        state.settings.storageMode = .customBackend
+        state.setScenePhase(.background)
+
+        await state.backfill(start: Date(timeIntervalSince1970: 1), end: Date(timeIntervalSince1970: 2))
+
+        XCTAssertTrue(idleTimerChanges.isEmpty)
+    }
+}
 
 final class PopulatedWorkoutExportTests: XCTestCase {
     func testEllipticalWithAllMetricsSurvivesQueueAndHTTPEncoding() async throws {
@@ -1200,6 +1229,30 @@ final class UploadTransportRecoveryTests: XCTestCase {
 
 
 final class RawHistoryBackfillTests: XCTestCase {
+    @MainActor
+    func testBackfillProgressCountsOnlyTypesThatFinish() async throws {
+        let at = Date(timeIntervalSince1970: 1_700_000_000)
+        var reads = 0
+        var completedTypes: [Int] = []
+        let manager = HealthKitManager(backfillPageReader: { _, _, _, _ in
+            reads += 1
+            if reads == 2 { throw HKError(.errorDatabaseInaccessible) }
+            return .init(samples: [], deletedCount: 0, anchor: nil)
+        })
+
+        do {
+            try await manager.forEachBackfillBatch(
+                types: [.oxygenSaturation, .hrvSDNN], start: at, end: at.addingTimeInterval(60), mode: .rawSamples,
+                onTypesCompleted: { completedTypes.append($0) }
+            ) { _ in XCTFail("Empty pages must not upload") }
+            XCTFail("The second HealthKit read must fail")
+        } catch let error as HKError {
+            XCTAssertEqual(error.code, .errorDatabaseInaccessible)
+        }
+
+        XCTAssertEqual(completedTypes, [1])
+    }
+
     func testOnlyBloodOxygenAndHRVBypassDailyStatistics() {
         let manager = HealthKitManager()
         for type in HealthDataType.allCases {

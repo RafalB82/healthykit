@@ -23,6 +23,21 @@ struct ContentRootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = InitialAppTab.resolve()
 
+    @ViewBuilder
+    private var syncProgress: some View {
+        switch appState.foregroundSync {
+        case .historical:
+            ForegroundSyncProgressView(title: "Syncing selected range…", progress: appState.backfillProgress)
+        case .initialImport:
+            ForegroundSyncProgressView(
+                title: appState.initialImportProgress == 0 ? "Reading Apple Health…" : "Syncing Apple Health…",
+                progress: appState.initialImportProgress
+            )
+        case nil:
+            EmptyView()
+        }
+    }
+
     var body: some View {
         Group {
             if appState.shouldShowOnboarding {
@@ -43,7 +58,21 @@ struct ContentRootView: View {
                 }
             }
         }
-        .onChange(of: scenePhase) { _, newPhase in
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if appState.foregroundSync != nil {
+                VStack(spacing: 8) {
+                    syncProgress
+                    if appState.canStopSync {
+                        StopSyncButton()
+                    }
+                }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(.regularMaterial)
+            }
+        }
+        .onChange(of: scenePhase, initial: true) { _, newPhase in
+            appState.setScenePhase(newPhase)
             switch newPhase {
             case .active:
                 Task {
@@ -56,6 +85,38 @@ struct ContentRootView: View {
             @unknown default:
                 break
             }
+        }
+    }
+}
+
+private struct ForegroundSyncProgressView: View {
+    let title: String
+    let progress: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ProgressView(value: progress) {
+                HStack {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    if progress == 0 {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .controlSize(.small)
+                            .accessibilityHidden(true)
+                    } else {
+                        Text(progress, format: .percent.precision(.fractionLength(0)).rounded(rule: .down))
+                            .monospacedDigit()
+                            .accessibilityHidden(true)
+                    }
+                }
+            }
+            .tint(HealthSyncTheme.primaryBlue)
+
+            Text("Keep HealthSync open. Your screen is staying on.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 }

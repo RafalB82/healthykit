@@ -3,6 +3,33 @@ import SQLite3
 @testable import HealthSync
 
 final class LocalStoreTests: XCTestCase {
+    func testSavedAnchorPreventsRequiringAnotherInitialImportAfterRestart() async throws {
+        let url = temporaryDatabaseURL()
+        let store = try SQLiteLocalStore(url: url)
+        let freshNeedsImport = try await store.requiresInitialImport()
+        XCTAssertTrue(freshNeedsImport)
+
+        try await store.saveAnchor("existing-anchor", for: .stepCount)
+        let reopened = try SQLiteLocalStore(url: url)
+        let reopenedNeedsImport = try await reopened.requiresInitialImport()
+        XCTAssertFalse(reopenedNeedsImport)
+    }
+
+    func testInterruptedInitialImportStillRequiresConfirmationAfterSavingAnAnchor() async throws {
+        let url = temporaryDatabaseURL()
+        let store = try SQLiteLocalStore(url: url)
+        try await store.setInitialImportCompleted(false)
+        try await store.saveAnchor("saved-before-upload", for: .stepCount)
+
+        let reopened = try SQLiteLocalStore(url: url)
+        let interruptedNeedsImport = try await reopened.requiresInitialImport()
+        XCTAssertTrue(interruptedNeedsImport)
+
+        try await reopened.setInitialImportCompleted(true)
+        let completedNeedsImport = try await reopened.requiresInitialImport()
+        XCTAssertFalse(completedNeedsImport)
+    }
+
     func testLegacyHostedSettingsMoveToCloudflareAndPersistWithoutResettingLocalState() async throws {
         let url = temporaryDatabaseURL()
         let store = try SQLiteLocalStore(url: url)
